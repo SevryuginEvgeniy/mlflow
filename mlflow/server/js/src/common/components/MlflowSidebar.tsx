@@ -200,6 +200,16 @@ export function MlflowSidebar({
             },
           ]
         : []),
+      {
+        key: 'zala',
+        icon: <BeakerIcon />,
+        linkProps: {
+          to: '/zala',
+          isActive: (location: Location) => location.pathname.startsWith('/zala'),
+          children: <FormattedMessage defaultMessage="ZALABench" description="Sidebar link for ZALABench page" />,
+        },
+        componentId: 'zala.sidebar.tab_link',
+      },
       ...(shouldShowGenAIFeatures(enableWorkflowBasedNavigation, workflowType) && !showNestedExperimentItems
         ? [
             {
