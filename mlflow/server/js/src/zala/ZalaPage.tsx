@@ -1,20 +1,566 @@
 /**
- * ZALABench — spike-страница.
+ * ZALABench — обзорная вкладка (Ф3.7).
  *
- * Доказывает, что аддитивная страница в UI MLflow собирается и открывается.
- * Данные будут приходить из нашего сервиса (FastAPI), не из API MLflow.
+ * Один экран: слева таблица прогонов эксперимента, справа детали выбранного
+ * прогона (статические и судейские метрики, вердикты по сэмплам, сравнение
+ * с вторым прогоном). Данные — MLflow REST напрямую (read-only).
  */
-import { Typography, useDesignSystemTheme } from '@databricks/design-system';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Empty,
+  Spinner,
+  Table,
+  TableCell,
+  TableHeader,
+  TableRow,
+  Tag,
+  Typography,
+  useDesignSystemTheme,
+} from '@databricks/design-system';
+
+import type { ZalaRunSummary, ZalaTrace } from './api';
+import { ZALA_RUNS_LIMIT, quoteFilterValue, searchZalaRuns, searchZalaTraces } from './api';
+
+/** Эксперимент `zalabench` в локальном MLflow (см. docs/UI-FORK.md). */
+const ZALA_EXPERIMENT_ID = '1';
+
+const CI_LOWER = '.ci_lower';
+const CI_UPPER = '.ci_upper';
+const STATUS_SUFFIX = '.status';
+
+/** Одна строка таблицы метрик (значение + доверительный интервал + статус). */
+interface MetricRow {
+  key: string;
+  value?: number;
+  ciLower?: number;
+  ciUpper?: number;
+  status?: string;
+}
+
+/** Собирает метрики с заданным префиксом, склеивая value/CI/status. */
+const collectMetrics = (run: ZalaRunSummary, prefix: string): MetricRow[] => {
+  const keys = new Set<string>();
+  Object.keys(run.metrics).forEach((key) => {
+    if (key.startsWith(prefix) && !key.endsWith(CI_LOWER) && !key.endsWith(CI_UPPER)) {
+      keys.add(key);
+    }
+  });
+  // Статусы приходят тегами: `zala.metric.pass_at_k.status`.
+  Object.keys(run.tags).forEach((key) => {
+    if (key.startsWith(prefix) && key.endsWith(STATUS_SUFFIX)) {
+      keys.add(key.slice(0, -STATUS_SUFFIX.length));
+    }
+  });
+  return Array.from(keys)
+    .sort()
+    .map((key) => ({
+      key,
+      value: run.metrics[key],
+      ciLower: run.metrics[`${key}${CI_LOWER}`],
+      ciUpper: run.metrics[`${key}${CI_UPPER}`],
+      status: run.tags[`${key}${STATUS_SUFFIX}`],
+    }));
+};
+
+/** Компактный вывод числа (без хвостовых нулей). */
+const formatNumber = (value: number): string => String(Number(value.toFixed(4)));
+
+/** `value [ci_lower, ci_upper]` либо прочерк. */
+const formatMetric = (row: MetricRow): string => {
+  const value = row.value !== undefined ? formatNumber(row.value) : '—';
+  if (row.ciLower === undefined || row.ciUpper === undefined) {
+    return value;
+  }
+  return `${value} [${formatNumber(row.ciLower)}, ${formatNumber(row.ciUpper)}]`;
+};
+
+/** Бейдж статуса метрики (insufficient_data / not_applicable). */
+const StatusBadge = ({ status }: { status?: string }) => {
+  if (!status) {
+    return null;
+  }
+  const color = status === 'insufficient_data' ? 'lemon' : status === 'not_applicable' ? 'charcoal' : 'default';
+  return (
+    <Tag componentId="zala.metric.status" color={color}>
+      {status}
+    </Tag>
+  );
+};
+
+/** Таблица метрик одного прогона (используется и в сравнении). */
+const MetricsTable = ({ run, prefix, componentId }: { run: ZalaRunSummary; prefix: string; componentId: string }) => {
+  const { theme } = useDesignSystemTheme();
+  const rows = collectMetrics(run, prefix);
+
+  return (
+    <Table
+      noMinHeight
+      css={{
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: theme.general.borderRadiusBase,
+        overflow: 'hidden',
+      }}
+    >
+      <TableRow isHeader>
+        <TableHeader componentId={`${componentId}.metric_header`} css={{ flex: 2 }}>
+          Метрика
+        </TableHeader>
+        <TableHeader componentId={`${componentId}.value_header`} css={{ flex: 2 }}>
+          Значение [CI]
+        </TableHeader>
+        <TableHeader componentId={`${componentId}.status_header`} css={{ flex: 1 }}>
+          Статус
+        </TableHeader>
+      </TableRow>
+      {rows.map((row) => (
+        <TableRow key={row.key}>
+          <TableCell css={{ flex: 2 }}>
+            <code>{row.key.slice(prefix.length)}</code>
+          </TableCell>
+          <TableCell css={{ flex: 2 }}>{formatMetric(row)}</TableCell>
+          <TableCell css={{ flex: 1 }}>
+            <StatusBadge status={row.status} />
+          </TableCell>
+        </TableRow>
+      ))}
+    </Table>
+  );
+};
+
+/** Список вердиктов по сэмплам выбранного прогона. */
+const VerdictsBlock = ({ run }: { run: ZalaRunSummary }) => {
+  const { theme } = useDesignSystemTheme();
+  const [traces, setTraces] = useState<ZalaTrace[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [reloadToken, setReloadToken] = useState(0);
+
+  const evalId = run.params?.['eval_id'];
+
+  useEffect(() => {
+    let cancelled = false;
+    setExpanded(new Set());
+    if (!evalId) {
+      setTraces([]);
+      setError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setIsLoading(true);
+    setError(null);
+    // Фильтр по eval_id прогона: трейсы судьи к этому прогону не относятся.
+    const filter = `tags.\`inspect.eval_id\` = ${quoteFilterValue(evalId)}`;
+    searchZalaTraces(ZALA_EXPERIMENT_ID, filter)
+      .then((result) => {
+        if (!cancelled) {
+          setTraces(result);
+        }
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+          setTraces([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [evalId, reloadToken]);
+
+  // E4: трейсов нет — блок скрыт.
+  if (!evalId) {
+    return null;
+  }
+  if (isLoading) {
+    return (
+      <div css={{ display: 'flex', gap: theme.spacing.sm, padding: theme.spacing.md, alignItems: 'center' }}>
+        <Spinner size="small" />
+        <Typography.Text color="secondary">Загрузка вердиктов…</Typography.Text>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <Alert
+        componentId="zala.verdicts.error"
+        type="error"
+        message="Не удалось загрузить вердикты"
+        description={error}
+        actions={[{ componentId: 'zala.verdicts.retry', children: 'Повторить', onClick: () => setReloadToken((n) => n + 1) }]}
+      />
+    );
+  }
+  if (traces.length === 0) {
+    return null;
+  }
+
+  const toggle = (traceId: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(traceId)) {
+        next.delete(traceId);
+      } else {
+        next.add(traceId);
+      }
+      return next;
+    });
+  };
+
+  return (
+    <Table
+      noMinHeight
+      css={{
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: theme.general.borderRadiusBase,
+        overflow: 'hidden',
+      }}
+    >
+      <TableRow isHeader>
+        <TableHeader componentId="zala.verdicts.sample_header" css={{ flex: 2 }}>
+          Сэмпл
+        </TableHeader>
+        <TableHeader componentId="zala.verdicts.count_header" css={{ flex: 1 }}>
+          Вердиктов
+        </TableHeader>
+        <TableHeader componentId="zala.verdicts.source_header" css={{ flex: 2 }}>
+          Судья
+        </TableHeader>
+        <TableHeader componentId="zala.verdicts.rationale_header" css={{ flex: 4 }}>
+          Вердикт
+        </TableHeader>
+      </TableRow>
+      {traces.map((trace) => {
+        const isOpen = expanded.has(trace.traceId);
+        const sources = Array.from(new Set(trace.assessments.map((a) => a.sourceId))).join(', ');
+        return (
+          <Fragment key={trace.traceId}>
+            <TableRow
+              css={{ cursor: 'pointer' }}
+              onClick={() => toggle(trace.traceId)}
+              aria-expanded={isOpen}
+            >
+              <TableCell css={{ flex: 2 }}>
+                <Typography.Text>{trace.sampleId}</Typography.Text>
+              </TableCell>
+              <TableCell css={{ flex: 1 }}>{trace.assessments.length}</TableCell>
+              <TableCell css={{ flex: 2 }}>{sources || '—'}</TableCell>
+              <TableCell css={{ flex: 4 }}>
+                <Typography.Text color="secondary">{isOpen ? 'Свернуть' : 'Показать rationale'}</Typography.Text>
+              </TableCell>
+            </TableRow>
+            {isOpen && (
+              <TableRow>
+                <TableCell css={{ flex: 9, display: 'block' }} wrapContent={false}>
+                  {trace.assessments.length === 0 ? (
+                    <Typography.Text color="secondary">Вердиктов нет</Typography.Text>
+                  ) : (
+                    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.sm }}>
+                      {trace.assessments.map((assessment, index) => (
+                        <div key={`${assessment.name}-${index}`} css={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center' }}>
+                            <strong>{assessment.name}</strong>
+                            <Tag componentId="zala.verdict.value" color="indigo">
+                              {assessment.value !== null ? formatNumber(assessment.value) : '—'}
+                            </Tag>
+                            <Typography.Text color="secondary">
+                              {assessment.sourceType} · {assessment.sourceId}
+                            </Typography.Text>
+                          </div>
+                          {assessment.rationale && (
+                            <Typography.Paragraph css={{ margin: 0 }}>{assessment.rationale}</Typography.Paragraph>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </TableCell>
+              </TableRow>
+            )}
+          </Fragment>
+        );
+      })}
+    </Table>
+  );
+};
+
+/** Сравнение двух прогонов по объединению метрик с CI. */
+const ComparisonBlock = ({ left, right }: { left: ZalaRunSummary; right: ZalaRunSummary }) => {
+  const { theme } = useDesignSystemTheme();
+  const rows = useMemo(() => {
+    const map = new Map<string, { left?: MetricRow; right?: MetricRow }>();
+    [left, right].forEach((run, index) => {
+      [...collectMetrics(run, 'zala.metric.'), ...collectMetrics(run, 'zala.judge.')].forEach((row) => {
+        const entry = map.get(row.key) ?? {};
+        if (index === 0) {
+          entry.left = row;
+        } else {
+          entry.right = row;
+        }
+        map.set(row.key, entry);
+      });
+    });
+    return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [left, right]);
+
+  if (rows.length === 0) {
+    return (
+      <Typography.Paragraph color="secondary">У выбранных прогонов нет метрик для сравнения.</Typography.Paragraph>
+    );
+  }
+
+  return (
+    <Table
+      noMinHeight
+      css={{
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: theme.general.borderRadiusBase,
+        overflow: 'hidden',
+      }}
+    >
+      <TableRow isHeader>
+        <TableHeader componentId="zala.compare.metric_header" css={{ flex: 2 }}>
+          Метрика
+        </TableHeader>
+        <TableHeader componentId="zala.compare.left_header" css={{ flex: 2 }}>
+          {left.runName}
+        </TableHeader>
+        <TableHeader componentId="zala.compare.right_header" css={{ flex: 2 }}>
+          {right.runName}
+        </TableHeader>
+      </TableRow>
+      {rows.map(([key, pair]) => (
+        <TableRow key={key}>
+          <TableCell css={{ flex: 2 }}>
+            <code>{key}</code>
+          </TableCell>
+          <TableCell css={{ flex: 2 }}>
+            {pair.left ? formatMetric(pair.left) : '—'}
+            {pair.left?.status && <> <StatusBadge status={pair.left.status} /></>}
+          </TableCell>
+          <TableCell css={{ flex: 2 }}>
+            {pair.right ? formatMetric(pair.right) : '—'}
+            {pair.right?.status && <> <StatusBadge status={pair.right.status} /></>}
+          </TableCell>
+        </TableRow>
+      ))}
+    </Table>
+  );
+};
 
 export const ZalaPage = () => {
   const { theme } = useDesignSystemTheme();
+  const [runs, setRuns] = useState<ZalaRunSummary[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [compareRunId, setCompareRunId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+    setError(null);
+    searchZalaRuns(ZALA_EXPERIMENT_ID)
+      .then((result) => {
+        if (cancelled) {
+          return;
+        }
+        setRuns(result);
+        // По умолчанию выбираем первый (самый свежий) прогон.
+        setSelectedRunId((prev) => (prev && result.some((r) => r.runId === prev) ? prev : result[0]?.runId ?? null));
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+          setRuns([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadToken]);
+
+  const selectedRun = useMemo(() => runs.find((run) => run.runId === selectedRunId), [runs, selectedRunId]);
+  const compareRun = useMemo(() => runs.find((run) => run.runId === compareRunId), [runs, compareRunId]);
+
+  const staticMetrics = selectedRun ? collectMetrics(selectedRun, 'zala.metric.') : [];
+  const judgeMetrics = selectedRun ? collectMetrics(selectedRun, 'zala.judge.') : [];
+
+  const selectRun = useCallback((runId: string) => {
+    setSelectedRunId(runId);
+    setCompareRunId((prev) => (prev === runId ? null : prev));
+  }, []);
+
+  const toggleCompare = useCallback((runId: string) => {
+    setCompareRunId((prev) => (prev === runId ? null : runId));
+  }, []);
 
   return (
-    <div css={{ padding: theme.spacing.lg }}>
-      <Typography.Title level={2}>ZALABench</Typography.Title>
-      <Typography.Paragraph>
-        Spike-страница UI-форка. Здесь появятся метрики по датасетам и планировщик прогонов.
-      </Typography.Paragraph>
+    <div css={{ padding: theme.spacing.lg, display: 'flex', flexDirection: 'column', gap: theme.spacing.lg }}>
+      <div>
+        <Typography.Title level={2}>ZALABench</Typography.Title>
+        <Typography.Paragraph color="secondary" css={{ marginBottom: 0 }}>
+          Прогоны бенчмарка, метрики и вердикты судьи. Данные читаются из MLflow REST.
+        </Typography.Paragraph>
+      </div>
+
+      {/* E3: MLflow недоступен — сообщение и повтор. */}
+      {error && (
+        <Alert
+          componentId="zala.runs.error"
+          type="error"
+          message="Не удалось получить прогоны из MLflow"
+          description={error}
+          actions={[{ componentId: 'zala.runs.retry', children: 'Повторить', onClick: () => setReloadToken((n) => n + 1) }]}
+        />
+      )}
+
+      {isLoading ? (
+        <div css={{ display: 'flex', gap: theme.spacing.sm, padding: theme.spacing.lg, alignItems: 'center' }}>
+          <Spinner size="small" />
+          <Typography.Text color="secondary">Загрузка прогонов…</Typography.Text>
+        </div>
+      ) : !error && runs.length === 0 ? (
+        /* E1: прогонов нет. */
+        <Empty
+          title="Прогонов пока нет"
+          description="Запустите бенчмарк — прогоны появятся здесь после публикации в MLflow."
+        />
+      ) : !error ? (
+        <div css={{ display: 'flex', gap: theme.spacing.lg, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          {/* Левая колонка — таблица прогонов. */}
+          <div css={{ flex: '1 1 480px', minWidth: 0 }}>
+            <Typography.Title level={4}>Прогоны</Typography.Title>
+            {runs.length >= ZALA_RUNS_LIMIT && (
+              <Typography.Paragraph color="secondary">
+                Показаны первые {ZALA_RUNS_LIMIT} прогонов.
+              </Typography.Paragraph>
+            )}
+            <Table
+              scrollable
+              noMinHeight
+              css={{
+                border: `1px solid ${theme.colors.border}`,
+                borderRadius: theme.general.borderRadiusBase,
+                overflow: 'hidden',
+              }}
+            >
+              <TableRow isHeader>
+                <TableHeader componentId="zala.runs.compare_header" css={{ flex: 0, minWidth: 40, maxWidth: 40 }}>
+                  ⇄
+                </TableHeader>
+                <TableHeader componentId="zala.runs.name_header" css={{ flex: 3 }}>
+                  Прогон
+                </TableHeader>
+                <TableHeader componentId="zala.runs.model_header" css={{ flex: 2 }}>
+                  Модель
+                </TableHeader>
+                <TableHeader componentId="zala.runs.dataset_header" css={{ flex: 2 }}>
+                  Датасет
+                </TableHeader>
+                <TableHeader componentId="zala.runs.status_header" css={{ flex: 1 }}>
+                  Статус
+                </TableHeader>
+                <TableHeader componentId="zala.runs.date_header" css={{ flex: 2 }}>
+                  Дата
+                </TableHeader>
+              </TableRow>
+              {runs.map((run) => {
+                const isSelected = run.runId === selectedRunId;
+                return (
+                  <TableRow
+                    key={run.runId}
+                    css={{
+                      cursor: 'pointer',
+                      backgroundColor: isSelected ? theme.colors.actionDefaultBackgroundHover : undefined,
+                    }}
+                    onClick={() => selectRun(run.runId)}
+                    aria-selected={isSelected}
+                  >
+                    <TableCell css={{ flex: 0, minWidth: 40, maxWidth: 40 }} wrapContent={false}>
+                      <span onClick={(event) => event.stopPropagation()}>
+                        <Checkbox
+                          componentId="zala.runs.compare_checkbox"
+                          isChecked={compareRunId === run.runId}
+                          onChange={() => toggleCompare(run.runId)}
+                          aria-label={`Сравнить прогон ${run.runName}`}
+                        />
+                      </span>
+                    </TableCell>
+                    <TableCell css={{ flex: 3 }}>{run.runName}</TableCell>
+                    <TableCell css={{ flex: 2 }}>{run.model}</TableCell>
+                    <TableCell css={{ flex: 2 }}>{run.dataset}</TableCell>
+                    <TableCell css={{ flex: 1 }}>{run.status}</TableCell>
+                    <TableCell css={{ flex: 2 }}>
+                      {run.startTime ? new Date(run.startTime).toLocaleString() : '—'}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </Table>
+          </div>
+
+          {/* Правая колонка — детали выбранного прогона. */}
+          <div css={{ flex: '1 1 520px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: theme.spacing.lg }}>
+            {selectedRun ? (
+              <>
+                <div>
+                  <Typography.Title level={4} css={{ marginBottom: theme.spacing.xs }}>
+                    {selectedRun.runName}
+                  </Typography.Title>
+                  <Typography.Text color="secondary">
+                    {selectedRun.model} · {selectedRun.dataset} · {selectedRun.status}
+                  </Typography.Text>
+                </div>
+
+                {/* E2: блоки метрик скрыты, если метрик нет. */}
+                {staticMetrics.length > 0 && (
+                  <div>
+                    <Typography.Title level={5}>Статические метрики</Typography.Title>
+                    <MetricsTable run={selectedRun} prefix="zala.metric." componentId="zala.metrics.static" />
+                  </div>
+                )}
+
+                {judgeMetrics.length > 0 && (
+                  <div>
+                    <Typography.Title level={5}>Судейские метрики</Typography.Title>
+                    <MetricsTable run={selectedRun} prefix="zala.judge." componentId="zala.metrics.judge" />
+                  </div>
+                )}
+
+                <div>
+                  <Typography.Title level={5}>Вердикты по сэмплам</Typography.Title>
+                  <VerdictsBlock run={selectedRun} />
+                </div>
+
+                {compareRun && (
+                  <div>
+                    <Typography.Title level={5}>Сравнение: {compareRun.runName}</Typography.Title>
+                    <ComparisonBlock left={selectedRun} right={compareRun} />
+                  </div>
+                )}
+              </>
+            ) : (
+              <Typography.Paragraph color="secondary">Выберите прогон в таблице слева.</Typography.Paragraph>
+            )}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };
