@@ -218,6 +218,18 @@ export const estimateJob = async (task: string, model: string, samples?: number)
 };
 
 /** Состояние сервиса. */
+/** Список моделей шлюза (GET /models). */
+export const listModels = async (): Promise<string[]> => {
+  const data = await request<{ models: string[] }>('/models');
+  return data.models;
+};
+
+/** Список доступных тасков (GET /tasks). */
+export const listTasks = async (): Promise<string[]> => {
+  const data = await request<{ tasks: string[] }>('/tasks');
+  return data.tasks;
+};
+
 export const apiHealth = async (): Promise<ZalaHealth> => {
   return request<ZalaHealth>('/health');
 };

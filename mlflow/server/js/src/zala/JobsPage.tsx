@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
+  Checkbox,
   Empty,
   Input,
   SimpleSelect,
@@ -24,7 +25,7 @@ import {
 } from '@databricks/design-system';
 
 import type { ZalaEstimate, ZalaJob } from './jobsApi';
-import { ZalaApiError, apiHealth, cancelJob, createJob, estimateJob, listJobs, retryJob } from './jobsApi';
+import { ZalaApiError, apiHealth, cancelJob, createJob, estimateJob, listJobs, listModels, listTasks, retryJob } from './jobsApi';
 
 /** Ключ sessionStorage с Bearer-токеном сервиса. */
 const TOKEN_STORAGE_KEY = 'zala.apiToken';
@@ -34,12 +35,6 @@ const POLL_INTERVAL_MS = 5000;
 
 /** Задержка debounce для оценки длительности, мс. */
 const ESTIMATE_DEBOUNCE_MS = 500;
-
-/** Доступные таски (реестр zalabench). */
-const TASK_OPTIONS = ['hello', 'agent_file', 'agent_bash'];
-
-/** Алиасы моделей шлюза. */
-const MODEL_OPTIONS = ['GLM-CLUSTER', 'Kimi-CLUSTER', 'DS-CLUSTER', 'MiMo-CLUSTER'];
 
 /** Датасет по умолчанию (как в JobCreate). */
 const DEFAULT_DATASET = 'Various eval';
@@ -122,8 +117,10 @@ export const JobsPage = () => {
   const [tokenError, setTokenError] = useState<string | null>(null);
 
   // Форма постановки.
-  const [task, setTask] = useState<string>('hello');
-  const [model, setModel] = useState<string>('GLM-CLUSTER');
+  const [taskOptions, setTaskOptions] = useState<string[]>([]);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [tasks, setTasks] = useState<string[]>([]);
+  const [model, setModel] = useState<string>('');
   const [dataset, setDataset] = useState<string>(DEFAULT_DATASET);
   const [seed, setSeed] = useState<string>('42');
   const [epochs, setEpochs] = useState<string>('1');
@@ -186,6 +183,28 @@ export const JobsPage = () => {
     await healthPromise;
   }, []);
 
+  // Опции формы: таски и модели из сервиса (не хардкод).
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const [taskList, modelList] = await Promise.all([listTasks(), listModels()]);
+        if (cancelled) return;
+        setTaskOptions(taskList);
+        setModelOptions(modelList);
+        if (taskList.length > 0 && tasks.length === 0) setTasks([taskList[0]]);
+        if (modelList.length > 0 && !model) setModel(modelList[0]);
+      } catch {
+        // Опции не критичны: форма покажет пустые списки.
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Первичная загрузка + автообновление раз в 5 с.
   useEffect(() => {
     refresh(true);
@@ -201,7 +220,7 @@ export const JobsPage = () => {
     setEstimate(null);
     setEstimateError(null);
     const timer = window.setTimeout(() => {
-      estimateJob(task, model)
+      estimateJob(tasks[0] ?? '', model)
         .then((result) => {
           if (!cancelled) {
             setEstimate(result);
@@ -217,7 +236,7 @@ export const JobsPage = () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [task, model]);
+  }, [tasks, model]);
 
   const onTokenChange = useCallback((value: string) => {
     setToken(value);
@@ -257,18 +276,26 @@ export const JobsPage = () => {
     setSubmitNotice(null);
     setTokenError(null);
     try {
-      const job = await createJob(
-        {
-          task,
-          model,
-          dataset: dataset.trim() || DEFAULT_DATASET,
-          seed: seedValue,
-          epochs: epochsValue,
-          scheduledAt: scheduledAt || undefined,
-        },
-        token,
+      const created: string[] = [];
+      for (const taskName of tasks) {
+        const job = await createJob(
+          {
+            task: taskName,
+            model,
+            dataset: dataset.trim() || DEFAULT_DATASET,
+            seed: seedValue,
+            epochs: epochsValue,
+            scheduledAt: scheduledAt || undefined,
+          },
+          token,
+        );
+        created.push(job.jobId.slice(0, 8));
+      }
+      setSubmitNotice(
+        created.length === 1
+          ? `Job ${created[0]} поставлен в очередь.`
+          : `Поставлено задач: ${created.length} (${created.join(', ')}).`,
       );
-      setSubmitNotice(`Job ${job.jobId.slice(0, 8)} поставлен в очередь (${job.status}).`);
       await refresh(false);
     } catch (e: unknown) {
       if (e instanceof ZalaApiError && e.status === 401) {
@@ -279,7 +306,7 @@ export const JobsPage = () => {
     } finally {
       setIsSubmitting(false);
     }
-  }, [token, seed, epochs, task, model, dataset, scheduledAt, refresh]);
+  }, [token, seed, epochs, tasks, model, dataset, scheduledAt, refresh]);
 
   const onCancel = useCallback(
     async (jobId: string) => {
@@ -551,19 +578,23 @@ export const JobsPage = () => {
           </Typography.Title>
 
           <div>
-            <Typography.Text color="secondary">Task</Typography.Text>
-            <SimpleSelect
-              id="zala-jobs-task"
-              componentId="zala.jobs.form.task"
-              value={task}
-              onChange={({ target }) => setTask(target.value)}
-            >
-              {TASK_OPTIONS.map((option) => (
-                <SimpleSelectOption key={option} value={option}>
+            <Typography.Text color="secondary">Задачи</Typography.Text>
+            <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+              {taskOptions.map((option) => (
+                <Checkbox
+                  key={option}
+                  componentId={`zala.jobs.form.task.${option}`}
+                  isChecked={tasks.includes(option)}
+                  onChange={(checked) =>
+                    setTasks((prev) =>
+                      checked ? [...prev, option] : prev.filter((t) => t !== option),
+                    )
+                  }
+                >
                   {option}
-                </SimpleSelectOption>
+                </Checkbox>
               ))}
-            </SimpleSelect>
+            </div>
           </div>
 
           <div>
@@ -574,7 +605,7 @@ export const JobsPage = () => {
               value={model}
               onChange={({ target }) => setModel(target.value)}
             >
-              {MODEL_OPTIONS.map((option) => (
+              {modelOptions.map((option) => (
                 <SimpleSelectOption key={option} value={option}>
                   {option}
                 </SimpleSelectOption>
