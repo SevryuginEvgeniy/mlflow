@@ -3,6 +3,7 @@ import {
   Avatar,
   BeakerIcon,
   Button,
+  ClockIcon,
   CloudModelIcon,
   DropdownMenu,
   GearIcon,
@@ -209,6 +210,18 @@ export function MlflowSidebar({
           children: <FormattedMessage defaultMessage="ZALABench" description="Sidebar link for ZALABench page" />,
         },
         componentId: 'zala.sidebar.tab_link',
+      },
+      {
+        key: 'zala-jobs',
+        icon: <ClockIcon />,
+        linkProps: {
+          to: '/zala/jobs',
+          isActive: (location: Location) => location.pathname.startsWith('/zala/jobs'),
+          children: (
+            <FormattedMessage defaultMessage="ZALABench · Планировщик" description="Sidebar link for ZALABench jobs page" />
+          ),
+        },
+        componentId: 'zala.sidebar.jobs_tab_link',
       },
       ...(shouldShowGenAIFeatures(enableWorkflowBasedNavigation, workflowType) && !showNestedExperimentItems
         ? [
