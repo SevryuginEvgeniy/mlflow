@@ -61,6 +61,29 @@ const StatusBadge = ({ status }: { status: string }) => {
 /** Компактная дата-время либо прочерк. */
 const formatDate = (value: string | null): string => (value ? new Date(value).toLocaleString() : '—');
 
+/** Длительность прогона: finished - started; для running — до текущего момента. */
+const formatDuration = (startedAt: string | null, finishedAt: string | null): string => {
+  if (!startedAt) {
+    return '—';
+  }
+  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+  const ms = end - new Date(startedAt).getTime();
+  if (!Number.isFinite(ms) || ms < 0) {
+    return '—';
+  }
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}ч ${minutes}м`;
+  }
+  if (minutes > 0) {
+    return `${minutes}м ${seconds}с`;
+  }
+  return `${seconds}с`;
+};
+
 /** Прошедшее время от старта job'а в человекочитаемом виде. */
 const formatElapsed = (startedAt: string | null): string => {
   if (!startedAt) {
@@ -487,10 +510,16 @@ export const JobsPage = () => {
                   Статус
                 </TableHeader>
                 <TableHeader componentId="zala.jobs.scheduled_header" css={{ flex: 1.6 }}>
-                  Запуск
+                  Отложенный запуск
                 </TableHeader>
                 <TableHeader componentId="zala.jobs.created_header" css={{ flex: 1.6 }}>
                   Создан
+                </TableHeader>
+                <TableHeader componentId="zala.jobs.started_header" css={{ flex: 1.6 }}>
+                  Начат
+                </TableHeader>
+                <TableHeader componentId="zala.jobs.duration_header" css={{ flex: 1 }}>
+                  Длительность
                 </TableHeader>
                 <TableHeader componentId="zala.jobs.attempts_header" css={{ flex: 0.8 }}>
                   Попытки
@@ -519,6 +548,8 @@ export const JobsPage = () => {
                     </TableCell>
                     <TableCell css={{ flex: 1.6 }}>{formatDate(job.scheduledAt)}</TableCell>
                     <TableCell css={{ flex: 1.6 }}>{formatDate(job.createdAt)}</TableCell>
+                    <TableCell css={{ flex: 1.6 }}>{formatDate(job.startedAt)}</TableCell>
+                    <TableCell css={{ flex: 1 }}>{formatDuration(job.startedAt, job.finishedAt)}</TableCell>
                     <TableCell css={{ flex: 0.8 }}>{job.attempts}</TableCell>
                     <TableCell css={{ flex: 1.6 }}>
                       {job.status === 'running'
