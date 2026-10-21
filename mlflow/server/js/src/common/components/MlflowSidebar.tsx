@@ -223,6 +223,18 @@ export function MlflowSidebar({
         },
         componentId: 'zala.sidebar.jobs_tab_link',
       },
+      {
+        key: 'zala-datasets',
+        icon: <BeakerIcon />,
+        linkProps: {
+          to: '/zala/datasets',
+          isActive: (location: Location) => location.pathname.startsWith('/zala/datasets'),
+          children: (
+            <FormattedMessage defaultMessage="ZALABench · Датасеты" description="Sidebar link for ZALABench datasets page" />
+          ),
+        },
+        componentId: 'zala.sidebar.datasets_tab_link',
+      },
       ...(shouldShowGenAIFeatures(enableWorkflowBasedNavigation, workflowType) && !showNestedExperimentItems
         ? [
             {

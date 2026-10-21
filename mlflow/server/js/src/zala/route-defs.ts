@@ -1,6 +1,7 @@
 import { createMLflowRoutePath, createRouteElement, type DocumentTitleHandle } from '../common/utils/RoutingUtils';
 import ZalaPage from './ZalaPage';
 import JobsPage from './JobsPage';
+import DatasetsPage from './DatasetsPage';
 
 /**
  * ZALABench routes (аддитивные, UI-форк).
@@ -17,5 +18,11 @@ export const getZalaRouteDefs = () => [
     element: createRouteElement(JobsPage),
     pageId: 'zala.jobs',
     handle: { getPageTitle: () => 'ZALABench · Планировщик' } satisfies DocumentTitleHandle,
+  },
+  {
+    path: createMLflowRoutePath('/zala/datasets'),
+    element: createRouteElement(DatasetsPage),
+    pageId: 'zala.datasets',
+    handle: { getPageTitle: () => 'ZALABench · Датасеты' } satisfies DocumentTitleHandle,
   },
 ];
