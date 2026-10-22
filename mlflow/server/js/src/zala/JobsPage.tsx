@@ -5,7 +5,7 @@
  * cancel/retry. Данные — из нашего сервиса `zalabench-api` (FastAPI),
  * не из MLflow REST (см. docs/UI-FORK.md).
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -24,8 +24,26 @@ import {
   useDesignSystemTheme,
 } from '@databricks/design-system';
 
+import type { ZalaDatasetSummary } from './datasetsApi';
+import { listDatasets } from './datasetsApi';
 import type { ZalaEstimate, ZalaJob } from './jobsApi';
-import { ZalaApiError, apiHealth, cancelJob, createJob, estimateJob, listJobs, listModels, listTasks, retryJob } from './jobsApi';
+import {
+  ZalaApiError,
+  apiHealth,
+  cancelJob,
+  clearQueue,
+  createGroupJobs,
+  createJob,
+  deleteJob,
+  estimateJob,
+  getApiBase,
+  createExperiment,
+  listExperiments,
+  listJobs,
+  listModels,
+  listTasks,
+  retryJob,
+} from './jobsApi';
 
 /** Ключ sessionStorage с Bearer-токеном сервиса. */
 const TOKEN_STORAGE_KEY = 'zala.apiToken';
@@ -39,7 +57,32 @@ const ESTIMATE_DEBOUNCE_MS = 500;
 /** Датасет по умолчанию (как в JobCreate). */
 const DEFAULT_DATASET = 'Various eval';
 
+/** MLflow-эксперимент по умолчанию (как в JobCreate). */
+const DEFAULT_EXPERIMENT = 'zalabench';
+
+/** Значение селекта «создать новый эксперимент». */
+const NEW_EXPERIMENT_VALUE = '__new__';
+
+/**
+ * Уровни reasoning (Ф5.1). `auto` — не передавать: Inspect такого уровня не
+ * знает; `minimal` сервис принимает, но в UI не показываем.
+ */
+const REASONING_EFFORT_OPTIONS = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max'];
+
 /** Бейдж статуса job'а. */
+/** Статусы, строку которых можно удалить из очереди (Ф5 §8.1). */
+const DELETABLE_STATUSES = ['pending', 'failed', 'done', 'cancelled', 'partial'];
+
+/** Русские подписи статусов; неизвестный статус показываем как есть. */
+const STATUS_LABELS: Record<string, string> = {
+  pending: 'pending',
+  running: 'running',
+  done: 'done',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  partial: 'partial',
+};
+
 const StatusBadge = ({ status }: { status: string }) => {
   const color =
     status === 'running'
@@ -50,16 +93,51 @@ const StatusBadge = ({ status }: { status: string }) => {
           ? 'coral'
           : status === 'pending'
             ? 'lemon'
-            : 'default';
+            : status === 'cancelled'
+              ? 'charcoal'
+              : status === 'partial'
+                ? 'turquoise'
+                : 'default';
   return (
     <Tag componentId="zala.jobs.status" color={color}>
-      {status}
+      {STATUS_LABELS[status] ?? status}
     </Tag>
   );
 };
 
-/** Компактная дата-время либо прочерк. */
-const formatDate = (value: string | null): string => (value ? new Date(value).toLocaleString() : '—');
+/**
+ * Ф5.8 M3: дата и время по отдельности — колонка узкая, однострочное
+ * «дд.мм.гггг, чч:мм:сс» обрезалось до даты. Ячейка показывает дату крупно,
+ * время второй строкой мелким шрифтом.
+ */
+const formatDateParts = (value: string | null): { date: string; time: string } => {
+  if (!value) {
+    return { date: '—', time: '' };
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return { date: '—', time: '' };
+  }
+  return {
+    date: date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }),
+    time: date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+  };
+};
+
+/** Ф5.8 M3: ячейка даты/времени в две строки — дата сверху, время снизу мелким. */
+const DateTimeCell = ({ value }: { value: string | null }) => {
+  const { theme } = useDesignSystemTheme();
+  const parts = formatDateParts(value);
+  if (!parts.time) {
+    return <span>{parts.date}</span>;
+  }
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
+      <span>{parts.date}</span>
+      <span css={{ fontSize: theme.typography.fontSizeSm, color: theme.colors.textSecondary }}>{parts.time}</span>
+    </div>
+  );
+};
 
 /** Длительность прогона: finished - started; для running — до текущего момента. */
 const formatDuration = (startedAt: string | null, finishedAt: string | null): string => {
@@ -145,9 +223,39 @@ export const JobsPage = () => {
   const [tasks, setTasks] = useState<string[]>([]);
   const [model, setModel] = useState<string>('');
   const [dataset, setDataset] = useState<string>(DEFAULT_DATASET);
+  // Датасеты реестра (GET /datasets): не хардкод — локальные + внешние.
+  const [datasetOptions, setDatasetOptions] = useState<ZalaDatasetSummary[]>([]);
+  // Ф5.2: составной прогон — выбранные внешние датасеты (общий group_id).
+  // Пусто -> обычная постановка по одному датасету.
+  const [groupDatasets, setGroupDatasets] = useState<string[]>([]);
+  const [experimentOptions, setExperimentOptions] = useState<string[]>([DEFAULT_EXPERIMENT]);
+  const [experiment, setExperiment] = useState<string>(DEFAULT_EXPERIMENT);
+  const [newExperiment, setNewExperiment] = useState<string>('');
   const [seed, setSeed] = useState<string>('42');
   const [epochs, setEpochs] = useState<string>('1');
   const [scheduledAt, setScheduledAt] = useState<string>('');
+  // Ф5.8e: приоритет очереди, watchdog (минуты в UI, секунды в API) и роли.
+  const [priority, setPriority] = useState<string>('0');
+  const [timeLimitMinutes, setTimeLimitMinutes] = useState<string>('');
+  const [roleJudge, setRoleJudge] = useState<string>('');
+  const [roleGrader, setRoleGrader] = useState<string>('');
+  const [roleUser, setRoleUser] = useState<string>('');
+  // Ф5.8e: раскрытые строки таблицы (роли моделей не влезают в 12 колонок).
+  const [expandedJobIds, setExpandedJobIds] = useState<string[]>([]);
+
+  // Ф5.1: ручки генерации. Основные — всегда на виду, расширенные — свёрнуты.
+  const [temperature, setTemperature] = useState<string>('0');
+  const [maxTokens, setMaxTokens] = useState<string>('');
+  const [reasoningEffort, setReasoningEffort] = useState<string>('auto');
+  const [systemPrompt, setSystemPrompt] = useState<string>('');
+  const [topP, setTopP] = useState<string>('');
+  const [topK, setTopK] = useState<string>('');
+  const [advancedOpen, setAdvancedOpen] = useState<boolean>(false);
+  // Внешний датасет: system prompt вшит в inspect_evals (Ф5.1).
+  const isExternalDataset = useMemo(
+    () => datasetOptions.find((item) => item.name === dataset)?.kind === 'external',
+    [datasetOptions, dataset],
+  );
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitNotice, setSubmitNotice] = useState<string | null>(null);
@@ -211,10 +319,20 @@ export const JobsPage = () => {
     let cancelled = false;
     const load = async () => {
       try {
-        const [taskList, modelList] = await Promise.all([listTasks(), listModels()]);
+        const [taskList, modelList, datasetList, experimentList] = await Promise.all([
+          listTasks(),
+          listModels(),
+          listDatasets(),
+          listExperiments().catch(() => []),
+        ]);
         if (cancelled) return;
         setTaskOptions(taskList);
         setModelOptions(modelList);
+        setDatasetOptions(datasetList);
+        // Ф5.6: эксперименты — из сервиса; дефолт остаётся zalabench.
+        setExperimentOptions(
+          experimentList.length > 0 ? experimentList.map((item) => item.name) : [DEFAULT_EXPERIMENT],
+        );
         if (taskList.length > 0 && tasks.length === 0) setTasks([taskList[0]]);
         if (modelList.length > 0 && !model) setModel(modelList[0]);
       } catch {
@@ -243,7 +361,7 @@ export const JobsPage = () => {
     setEstimate(null);
     setEstimateError(null);
     const timer = window.setTimeout(() => {
-      estimateJob(tasks[0] ?? '', model)
+      estimateJob(tasks[0] ?? '', model, undefined, dataset)
         .then((result) => {
           if (!cancelled) {
             setEstimate(result);
@@ -259,7 +377,21 @@ export const JobsPage = () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [tasks, model]);
+  }, [tasks, model, dataset]);
+
+  /** Выбор датасета: внешний диктует task (пара dataset/task валидируется API). */
+  const onDatasetChange = useCallback(
+    (name: string) => {
+      setDataset(name);
+      setSubmitError(null);
+      const selected = datasetOptions.find((item) => item.name === name);
+      if (selected?.kind === 'external') {
+        // Внешний датасет исполняется своим таском — подставляем автоматически.
+        setTasks([name]);
+      }
+    },
+    [datasetOptions],
+  );
 
   const onTokenChange = useCallback((value: string) => {
     setToken(value);
@@ -293,32 +425,147 @@ export const JobsPage = () => {
       setSubmitError('epochs: ожидалось целое число >= 1');
       return;
     }
+    // Ф5.8e: приоритет 0..10 и лимит времени в минутах (в API — секунды).
+    const priorityValue = priority.trim() === '' ? 0 : Number(priority);
+    if (!Number.isInteger(priorityValue) || priorityValue < 0 || priorityValue > 10) {
+      setSubmitError('приоритет: целое 0..10');
+      return;
+    }
+    let timeLimitS: number | undefined;
+    if (timeLimitMinutes.trim() !== '') {
+      const minutesValue = Number(timeLimitMinutes);
+      if (!Number.isInteger(minutesValue) || minutesValue < 1) {
+        setSubmitError('лимит времени: пусто (без лимита) или целое >= 1 мин');
+        return;
+      }
+      timeLimitS = minutesValue * 60;
+    }
+    const modelRoles: Record<string, string> = {};
+    if (roleJudge) modelRoles['judge'] = roleJudge;
+    if (roleGrader) modelRoles['grader'] = roleGrader;
+    if (roleUser) modelRoles['user'] = roleUser;
+    // Ф5.2: составной прогон требует хотя бы два внешних датасета.
+    if (groupDatasets.length === 1) {
+      setSubmitError('составной прогон: выберите минимум два датасета или снимите отметки');
+      return;
+    }
+    // Ф5.1: ручки генерации — проверяем диапазоны до отправки (сервис тоже
+    // вернёт 422, но здесь сообщение понятнее и без похода в сеть).
+    const knobs: Record<string, unknown> = {};
+    const temperatureValue = Number(temperature);
+    if (temperature.trim() === '' || !Number.isFinite(temperatureValue)) {
+      setSubmitError('temperature: ожидалось число');
+      return;
+    }
+    if (temperatureValue < 0 || temperatureValue > 2) {
+      setSubmitError('temperature: диапазон 0.0–2.0');
+      return;
+    }
+    knobs['temperature'] = temperatureValue;
+    if (maxTokens.trim() !== '') {
+      const value = Number(maxTokens);
+      if (!Number.isInteger(value) || value < 1) {
+        setSubmitError('max_tokens: пусто (без лимита) или целое >= 1');
+        return;
+      }
+      knobs['max_tokens'] = value;
+    }
+    if (reasoningEffort !== 'auto') {
+      knobs['reasoning_effort'] = reasoningEffort;
+    }
+    if (systemPrompt.trim()) {
+      knobs['system_prompt'] = systemPrompt.trim();
+    }
+    if (topP.trim() !== '') {
+      const value = Number(topP);
+      if (!Number.isFinite(value) || value < 0 || value > 1) {
+        setSubmitError('top_p: диапазон 0.0–1.0');
+        return;
+      }
+      knobs['top_p'] = value;
+    }
+    if (topK.trim() !== '') {
+      const value = Number(topK);
+      if (!Number.isInteger(value) || value < 0) {
+        setSubmitError('top_k: целое >= 0');
+        return;
+      }
+      knobs['top_k'] = value;
+    }
 
     setIsSubmitting(true);
     setSubmitError(null);
     setSubmitNotice(null);
     setTokenError(null);
     try {
+      // Ф5.6: выбранный эксперимент; «новый» -> создаём перед постановкой.
+      let experimentName = experiment;
+      if (experiment === NEW_EXPERIMENT_VALUE) {
+        const name = newExperiment.trim();
+        if (!name) {
+          setSubmitError('имя нового эксперимента: пусто');
+          setIsSubmitting(false);
+          return;
+        }
+        const createdExperiment = await createExperiment(name, token);
+        experimentName = createdExperiment.name;
+        setExperimentOptions((prev) => (prev.includes(name) ? prev : [...prev, name]));
+        setExperiment(name);
+        setNewExperiment('');
+      }
+
       const created: string[] = [];
-      for (const taskName of tasks) {
-        const job = await createJob(
+      if (groupDatasets.length > 0) {
+        // Ф5.2: составной прогон — N задач с общим group_id. `task`
+        // определяется сервисом по имени датасета; system_prompt у внешних
+        // датасетов вшит в inspect_evals и не передаётся.
+        const groupKnobs = { ...knobs };
+        delete groupKnobs['system_prompt'];
+        const group = await createGroupJobs(
           {
-            task: taskName,
+            datasets: groupDatasets,
             model,
-            dataset: dataset.trim() || DEFAULT_DATASET,
             seed: seedValue,
             epochs: epochsValue,
             scheduledAt: scheduledAt || undefined,
+            experiment: experimentName,
+            knobs: groupKnobs,
+            priority: priorityValue,
+            timeLimitS,
+            modelRoles,
           },
           token,
         );
-        created.push(job.jobId.slice(0, 8));
+        group.jobs.forEach((job) => created.push(job.jobId.slice(0, 8)));
+        setSubmitNotice(
+          `Составной прогон ${group.groupId.slice(0, 8)}: задач ${created.length} (${created.join(', ')}).`,
+        );
+      } else {
+        for (const taskName of tasks) {
+          const job = await createJob(
+            {
+              task: taskName,
+              model,
+              dataset: dataset.trim() || DEFAULT_DATASET,
+              seed: seedValue,
+              epochs: epochsValue,
+              scheduledAt: scheduledAt || undefined,
+              experiment: experimentName,
+              knobs,
+              priority: priorityValue,
+              timeLimitS,
+              modelRoles,
+            },
+            token,
+          );
+          created.push(job.jobId.slice(0, 8));
+        }
+        setSubmitNotice(
+          created.length === 1
+            ? `Job ${created[0]} поставлен в очередь.`
+            : `Поставлено задач: ${created.length} (${created.join(', ')}).`,
+        );
       }
-      setSubmitNotice(
-        created.length === 1
-          ? `Job ${created[0]} поставлен в очередь.`
-          : `Поставлено задач: ${created.length} (${created.join(', ')}).`,
-      );
       await refresh(false);
     } catch (e: unknown) {
       if (e instanceof ZalaApiError && e.status === 401) {
@@ -329,10 +576,37 @@ export const JobsPage = () => {
     } finally {
       setIsSubmitting(false);
     }
-  }, [token, seed, epochs, tasks, model, dataset, scheduledAt, refresh]);
+  }, [
+    token,
+    seed,
+    epochs,
+    tasks,
+    model,
+    dataset,
+    groupDatasets,
+    scheduledAt,
+    experiment,
+    newExperiment,
+    temperature,
+    maxTokens,
+    reasoningEffort,
+    systemPrompt,
+    topP,
+    topK,
+    priority,
+    timeLimitMinutes,
+    roleJudge,
+    roleGrader,
+    roleUser,
+    refresh,
+  ]);
 
   const onCancel = useCallback(
     async (jobId: string) => {
+      // Ф5 §8.3: отмена running необратима — подтверждаем.
+      if (!window.confirm(`Отменить задачу ${jobId.slice(0, 8)}? Прогон будет прерван.`)) {
+        return;
+      }
       setPendingJobId(jobId);
       setActionError(null);
       setTokenError(null);
@@ -347,6 +621,41 @@ export const JobsPage = () => {
     },
     [token, refresh, handleActionError],
   );
+
+  const onDelete = useCallback(
+    async (jobId: string) => {
+      if (!window.confirm(`Удалить задачу ${jobId.slice(0, 8)} из очереди? Run и лог останутся.`)) {
+        return;
+      }
+      setPendingJobId(jobId);
+      setActionError(null);
+      setTokenError(null);
+      try {
+        await deleteJob(jobId, token);
+        await refresh(false);
+      } catch (e: unknown) {
+        handleActionError(e);
+      } finally {
+        setPendingJobId(null);
+      }
+    },
+    [token, refresh, handleActionError],
+  );
+
+  const onClearQueue = useCallback(async () => {
+    if (!window.confirm('Удалить ВСЕ ожидающие задачи из очереди? Run и логи останутся.')) {
+      return;
+    }
+    setActionError(null);
+    setTokenError(null);
+    try {
+      const { deleted } = await clearQueue('pending', token);
+      setSubmitNotice(`Удалено из очереди: ${deleted}`);
+      await refresh(false);
+    } catch (e: unknown) {
+      handleActionError(e);
+    }
+  }, [token, refresh, handleActionError]);
 
   const onRetry = useCallback(
     async (jobId: string) => {
@@ -434,7 +743,7 @@ export const JobsPage = () => {
           componentId="zala.jobs.unavailable"
           type="error"
           message="Сервис недоступен"
-          description={loadError?.message || healthError || 'Проверьте, что zalabench-api запущен на 127.0.0.1:8000.'}
+          description={loadError?.message || healthError || `Проверьте, что zalabench-api запущен (${getApiBase()}).`}
           actions={[
             { componentId: 'zala.jobs.unavailable_retry', children: 'Повторить', onClick: () => refresh(true) },
           ]}
@@ -467,11 +776,23 @@ export const JobsPage = () => {
       <div css={{ display: 'flex', gap: theme.spacing.lg, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         {/* Очередь. */}
         <div css={{ flex: '1 1 640px', minWidth: 0 }}>
-          <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'baseline' }}>
-            <Typography.Title level={4}>Очередь</Typography.Title>
+          <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center' }}>
+            <Typography.Title level={4} css={{ marginBottom: 0 }}>
+              Очередь
+            </Typography.Title>
             <Typography.Text color="secondary">
               {jobs.length} из {total}
             </Typography.Text>
+            {/* Ф5 §8.3: массовая очистка ожидающих задач. */}
+            <div css={{ marginLeft: 'auto' }}>
+              <Button
+                componentId="zala.jobs.clear_queue"
+                onClick={onClearQueue}
+                disabled={!hasToken || pendingJobId !== null || jobs.every((job) => job.status !== 'pending')}
+              >
+                Очистить очередь
+              </Button>
+            </div>
           </div>
 
           {isLoading ? (
@@ -506,6 +827,9 @@ export const JobsPage = () => {
                 <TableHeader componentId="zala.jobs.model_header" css={{ flex: 1.5 }}>
                   Модель
                 </TableHeader>
+                <TableHeader componentId="zala.jobs.experiment_header" css={{ flex: 1.2 }}>
+                  Эксперимент
+                </TableHeader>
                 <TableHeader componentId="zala.jobs.status_header" css={{ flex: 1 }}>
                   Статус
                 </TableHeader>
@@ -524,6 +848,12 @@ export const JobsPage = () => {
                 <TableHeader componentId="zala.jobs.attempts_header" css={{ flex: 0.8 }}>
                   Попытки
                 </TableHeader>
+                <TableHeader componentId="zala.jobs.priority_header" css={{ flex: 0.8 }}>
+                  Приоритет
+                </TableHeader>
+                <TableHeader componentId="zala.jobs.time_limit_header" css={{ flex: 0.9 }}>
+                  Лимит
+                </TableHeader>
                 <TableHeader componentId="zala.jobs.progress_header" css={{ flex: 1.6 }}>
                   Прогресс
                 </TableHeader>
@@ -536,25 +866,67 @@ export const JobsPage = () => {
               </TableRow>
               {jobs.map((job) => {
                 const isPending = pendingJobId === job.jobId;
+                const isExpanded = expandedJobIds.includes(job.jobId);
+                const roleEntries = Object.entries(job.modelRoles || {});
                 return (
-                  <TableRow key={job.jobId}>
+                  <Fragment key={job.jobId}>
+                  <TableRow>
                     <TableCell css={{ flex: 1 }}>
-                      <code>{job.jobId.slice(0, 8)}</code>
+                      <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+                        <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.xs }}>
+                          {/* Ф5.8e: раскрытие строки — роли моделей. */}
+                          <Button
+                            componentId="zala.jobs.expand"
+                            type="tertiary"
+                            onClick={() =>
+                              setExpandedJobIds((prev) =>
+                                prev.includes(job.jobId)
+                                  ? prev.filter((id) => id !== job.jobId)
+                                  : [...prev, job.jobId],
+                              )
+                            }
+                          >
+                            {isExpanded ? '▾' : '▸'}
+                          </Button>
+                          <code>{job.jobId.slice(0, 8)}</code>
+                        </div>
+                        {/* Ф5.2: бейдж «группа» у задач составного прогона. */}
+                        {job.groupId && (
+                          <Tag componentId="zala.jobs.group_badge" color="indigo" title={job.groupId}>
+                            группа {job.groupId.slice(0, 8)}
+                          </Tag>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell css={{ flex: 1.5 }}>{job.taskName}</TableCell>
                     <TableCell css={{ flex: 1.5 }}>{job.model}</TableCell>
+                    <TableCell css={{ flex: 1.2 }}>{job.experiment}</TableCell>
                     <TableCell css={{ flex: 1 }}>
                       <StatusBadge status={job.status} />
                     </TableCell>
-                    <TableCell css={{ flex: 1.6 }}>{formatDate(job.scheduledAt)}</TableCell>
-                    <TableCell css={{ flex: 1.6 }}>{formatDate(job.createdAt)}</TableCell>
-                    <TableCell css={{ flex: 1.6 }}>{formatDate(job.startedAt)}</TableCell>
+                    <TableCell css={{ flex: 1.6 }}>
+                      <DateTimeCell value={job.scheduledAt} />
+                    </TableCell>
+                    <TableCell css={{ flex: 1.6 }}>
+                      <DateTimeCell value={job.createdAt} />
+                    </TableCell>
+                    <TableCell css={{ flex: 1.6 }}>
+                      <DateTimeCell value={job.startedAt} />
+                    </TableCell>
                     <TableCell css={{ flex: 1 }}>{formatDuration(job.startedAt, job.finishedAt)}</TableCell>
                     <TableCell css={{ flex: 0.8 }}>{job.attempts}</TableCell>
+                    <TableCell css={{ flex: 0.8 }}>{job.priority}</TableCell>
+                    <TableCell css={{ flex: 0.9 }}>
+                      {job.timeLimitS != null ? `${Math.round(job.timeLimitS / 60)} мин` : '—'}
+                    </TableCell>
                     <TableCell css={{ flex: 1.6 }}>
                       {job.status === 'running'
                         ? `${job.progressDone}/${job.progressTotal ?? '?'} · ${formatElapsed(job.startedAt)}`
-                        : '—'}
+                        : job.status === 'partial'
+                          ? job.progressTotal != null
+                            ? `${job.progressDone} из ${job.progressTotal} сэмплов, прервано`
+                            : 'прервано'
+                          : '—'}
                     </TableCell>
                     <TableCell css={{ flex: 2 }}>
                       {job.error ? (
@@ -564,27 +936,60 @@ export const JobsPage = () => {
                       )}
                     </TableCell>
                     <TableCell css={{ flex: 1.6 }}>
-                      {job.status === 'pending' && (
-                        <Button
-                          componentId="zala.jobs.cancel"
-                          onClick={() => onCancel(job.jobId)}
-                          disabled={!hasToken || isPending}
-                        >
-                          {isPending ? 'Отмена…' : 'Отменить'}
-                        </Button>
-                      )}
-                      {job.status === 'failed' && (
-                        <Button
-                          componentId="zala.jobs.retry"
-                          onClick={() => onRetry(job.jobId)}
-                          disabled={!hasToken || isPending}
-                        >
-                          {isPending ? 'Повтор…' : 'Повторить'}
-                        </Button>
-                      )}
-                      {job.status !== 'pending' && job.status !== 'failed' && '—'}
+                      <div css={{ display: 'flex', gap: theme.spacing.xs, flexWrap: 'wrap' }}>
+                        {/* Ф5 §8.3: отмена доступна и для running (кооперативно). */}
+                        {(job.status === 'pending' || job.status === 'running') && (
+                          <Button
+                            componentId="zala.jobs.cancel"
+                            onClick={() => onCancel(job.jobId)}
+                            disabled={!hasToken || isPending}
+                          >
+                            {isPending ? 'Отмена…' : 'Отменить'}
+                          </Button>
+                        )}
+                        {job.status === 'failed' && (
+                          <Button
+                            componentId="zala.jobs.retry"
+                            onClick={() => onRetry(job.jobId)}
+                            disabled={!hasToken || isPending}
+                          >
+                            {isPending ? 'Повтор…' : 'Повторить'}
+                          </Button>
+                        )}
+                        {/* Ф5 §8.3: удаление строки (run и лог остаются). */}
+                        {DELETABLE_STATUSES.includes(job.status) && (
+                          <Button
+                            componentId="zala.jobs.delete"
+                            onClick={() => onDelete(job.jobId)}
+                            disabled={!hasToken || isPending}
+                          >
+                            {isPending ? 'Удаление…' : 'Удалить'}
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
+                  {/* Ф5.8e: раскрытие строки — роли моделей (не влезают в колонки). */}
+                  {isExpanded && (
+                    <TableRow>
+                      <TableCell css={{ flex: 1 }} multiline>
+                        {roleEntries.length === 0 ? (
+                          <Typography.Text color="secondary">
+                            Роли не заданы — Inspect подставит модель прогона.
+                          </Typography.Text>
+                        ) : (
+                          <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+                            {roleEntries.map(([role, roleModel]) => (
+                              <Typography.Text key={role} css={{ fontSize: 12 }}>
+                                {role} → {roleModel}
+                              </Typography.Text>
+                            ))}
+                          </div>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  </Fragment>
                 );
               })}
             </Table>
@@ -658,13 +1063,102 @@ export const JobsPage = () => {
           </div>
 
           <div>
+            <Typography.Text color="secondary">Эксперимент</Typography.Text>
+            <SimpleSelect
+              id="zala-jobs-experiment"
+              componentId="zala.jobs.form.experiment"
+              value={experiment}
+              onChange={({ target }) => setExperiment(target.value)}
+            >
+              {experimentOptions.map((option) => (
+                <SimpleSelectOption key={option} value={option}>
+                  {option}
+                </SimpleSelectOption>
+              ))}
+              <SimpleSelectOption value={NEW_EXPERIMENT_VALUE}>Создать новый…</SimpleSelectOption>
+            </SimpleSelect>
+            {experiment === NEW_EXPERIMENT_VALUE && (
+              <Input
+                componentId="zala.jobs.form.experiment_new"
+                value={newExperiment}
+                onChange={(e) => setNewExperiment(e.target.value)}
+                placeholder="имя нового эксперимента"
+                validationState={newExperiment.includes('/') ? 'error' : undefined}
+              />
+            )}
+          </div>
+
+          <div>
             <Typography.Text color="secondary">Датасет</Typography.Text>
-            <Input
+            <SimpleSelect
+              id="zala-jobs-dataset"
               componentId="zala.jobs.form.dataset"
               value={dataset}
-              onChange={(e) => setDataset(e.target.value)}
-              placeholder={DEFAULT_DATASET}
-            />
+              onChange={({ target }) => onDatasetChange(target.value)}
+            >
+              {datasetOptions.length === 0 ? (
+                <SimpleSelectOption value={DEFAULT_DATASET}>{DEFAULT_DATASET}</SimpleSelectOption>
+              ) : (
+                <>
+                  {/* Дефолт по умолчанию — display-алиас локального датасета. */}
+                  {!datasetOptions.some((item) => item.name === DEFAULT_DATASET) && (
+                    <SimpleSelectOption value={DEFAULT_DATASET}>
+                      {DEFAULT_DATASET} · dev
+                    </SimpleSelectOption>
+                  )}
+                  {datasetOptions.map((item) => (
+                    <SimpleSelectOption key={item.name} value={item.name}>
+                      {item.kind === 'external' ? `${item.name} · HF` : `${item.name} · dev`}
+                    </SimpleSelectOption>
+                  ))}
+                </>
+              )}
+            </SimpleSelect>
+            {datasetOptions.find((item) => item.name === dataset)?.kind === 'external' && (
+              <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                Внешний датасет: task = {dataset}, сэмплов в выборке:{' '}
+                {datasetOptions.find((item) => item.name === dataset)?.samples}
+              </Typography.Text>
+            )}
+          </div>
+
+          {/* Ф5.2: составной прогон — мультивыбор внешних датасетов. */}
+          <div>
+            <Typography.Text color="secondary">Составной прогон (датасеты)</Typography.Text>
+            <Typography.Paragraph color="secondary" css={{ fontSize: 12, marginBottom: theme.spacing.xs }}>
+              Отметьте два и более внешних датасета — сервис поставит по задаче на
+              каждый с общим group_id, а на вкладке «Результаты» появится общий скор.
+            </Typography.Paragraph>
+            <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+              {datasetOptions.filter((item) => item.kind === 'external').length === 0 ? (
+                <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                  Внешних датасетов в реестре нет.
+                </Typography.Text>
+              ) : (
+                datasetOptions
+                  .filter((item) => item.kind === 'external')
+                  .map((item) => (
+                    <Checkbox
+                      key={item.name}
+                      componentId={`zala.jobs.form.group.${item.name}`}
+                      isChecked={groupDatasets.includes(item.name)}
+                      onChange={(checked) =>
+                        setGroupDatasets((prev) =>
+                          checked ? [...prev, item.name] : prev.filter((name) => name !== item.name),
+                        )
+                      }
+                    >
+                      {item.name} · {item.samples} сэмплов
+                    </Checkbox>
+                  ))
+              )}
+            </div>
+            {groupDatasets.length > 0 && (
+              <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                Будет создано задач: {groupDatasets.length} ({groupDatasets.join(', ')});
+                поле «Датасет» и список задач выше игнорируются.
+              </Typography.Text>
+            )}
           </div>
 
           <div css={{ display: 'flex', gap: theme.spacing.sm }}>
@@ -686,6 +1180,220 @@ export const JobsPage = () => {
                 value={epochs}
                 onChange={(e) => setEpochs(e.target.value)}
               />
+            </div>
+          </div>
+
+          {/* Ф5.1: параметры генерации — основные ручки. */}
+          <div
+            css={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: theme.spacing.sm,
+              padding: theme.spacing.md,
+              border: `1px solid ${theme.colors.border}`,
+              borderRadius: theme.general.borderRadiusBase,
+            }}
+          >
+            <Typography.Title level={5} css={{ margin: 0 }}>
+              Параметры генерации
+            </Typography.Title>
+            <div css={{ display: 'flex', gap: theme.spacing.sm }}>
+              <div css={{ flex: 1 }}>
+                <Typography.Text color="secondary">Temperature (0.0–2.0)</Typography.Text>
+                <Input
+                  componentId="zala.jobs.form.temperature"
+                  type="number"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={temperature}
+                  onChange={(e) => setTemperature(e.target.value)}
+                />
+              </div>
+              <div css={{ flex: 1 }}>
+                <Typography.Text color="secondary">Max tokens (пусто — без лимита)</Typography.Text>
+                <Input
+                  componentId="zala.jobs.form.max_tokens"
+                  type="number"
+                  min={1}
+                  value={maxTokens}
+                  placeholder="без лимита"
+                  onChange={(e) => setMaxTokens(e.target.value)}
+                />
+              </div>
+            </div>
+            <div>
+              <Typography.Text color="secondary">Уровень reasoning (thinking)</Typography.Text>
+              <SimpleSelect
+                id="zala-jobs-reasoning-effort"
+                componentId="zala.jobs.form.reasoning_effort"
+                value={reasoningEffort}
+                onChange={({ target }) => setReasoningEffort(target.value)}
+              >
+                {REASONING_EFFORT_OPTIONS.map((option) => (
+                  <SimpleSelectOption key={option} value={option}>
+                    {option}
+                  </SimpleSelectOption>
+                ))}
+              </SimpleSelect>
+              {model === 'DS-CLUSTER' && (
+                <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                  Уровень слабо влияет на DS-CLUSTER: модель почти не меняет глубину
+                  рассуждений между none и max.
+                </Typography.Text>
+              )}
+            </div>
+            <div>
+              <Typography.Text color="secondary">
+                System prompt (только для своих тасков)
+              </Typography.Text>
+              <Input.TextArea
+                componentId="zala.jobs.form.system_prompt"
+                value={systemPrompt}
+                placeholder="Пусто — системный промпт таска по умолчанию"
+                rows={3}
+                onChange={(e) => setSystemPrompt(e.target.value)}
+              />
+              {isExternalDataset && (
+                <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                  Для внешнего датасета system prompt вшит в inspect_evals — поле
+                  будет отклонено сервисом (422).
+                </Typography.Text>
+              )}
+            </div>
+
+            {/* Расширенные ручки — свёрнуты, чтобы не перегружать форму. */}
+            <div>
+              <Typography.Link
+                componentId="zala.jobs.form.advanced_toggle"
+                onClick={() => setAdvancedOpen((prev) => !prev)}
+              >
+                {advancedOpen ? 'Скрыть расширенные' : 'Расширенные параметры'}
+              </Typography.Link>
+              {advancedOpen && (
+                <div css={{ display: 'flex', gap: theme.spacing.sm, marginTop: theme.spacing.sm }}>
+                  <div css={{ flex: 1 }}>
+                    <Typography.Text color="secondary">top_p (0.0–1.0)</Typography.Text>
+                    <Input
+                      componentId="zala.jobs.form.top_p"
+                      type="number"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={topP}
+                      placeholder="по умолчанию"
+                      onChange={(e) => setTopP(e.target.value)}
+                    />
+                  </div>
+                  <div css={{ flex: 1 }}>
+                    <Typography.Text color="secondary">top_k (≥ 0)</Typography.Text>
+                    <Input
+                      componentId="zala.jobs.form.top_k"
+                      type="number"
+                      min={0}
+                      value={topK}
+                      placeholder="по умолчанию"
+                      onChange={(e) => setTopK(e.target.value)}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Ф5.8e: приоритет и watchdog — параметры очереди, не генерации. */}
+          <div css={{ display: 'flex', gap: theme.spacing.sm }}>
+            <div css={{ flex: 1 }}>
+              <Typography.Text color="secondary">Приоритет (0–10)</Typography.Text>
+              <Input
+                componentId="zala.jobs.form.priority"
+                type="number"
+                min={0}
+                max={10}
+                value={priority}
+                onChange={(e) => setPriority(e.target.value)}
+              />
+              <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                Больше = раньше в очереди.
+              </Typography.Text>
+            </div>
+            <div css={{ flex: 1 }}>
+              <Typography.Text color="secondary">Лимит времени, мин (пусто — без лимита)</Typography.Text>
+              <Input
+                componentId="zala.jobs.form.time_limit_minutes"
+                type="number"
+                min={1}
+                value={timeLimitMinutes}
+                placeholder="без лимита"
+                onChange={(e) => setTimeLimitMinutes(e.target.value)}
+              />
+              <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                По истечении задача прерывается.
+              </Typography.Text>
+            </div>
+          </div>
+
+          {/* Ф5.8e: роли моделей для Inspect (пусто — модель прогона). */}
+          <div>
+            <Typography.Text color="secondary">Роли моделей</Typography.Text>
+            <Typography.Paragraph color="secondary" css={{ fontSize: 12, marginBottom: theme.spacing.xs }}>
+              Без роли Inspect подставит саму модель прогона — GLM будет судить GLM.
+            </Typography.Paragraph>
+            <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+              <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+                <Typography.Text css={{ width: 60 }}>judge</Typography.Text>
+                <div css={{ flex: 1 }}>
+                  <SimpleSelect
+                    id="zala-jobs-role-judge"
+                    componentId="zala.jobs.form.model_role.judge"
+                    value={roleJudge}
+                    onChange={({ target }) => setRoleJudge(target.value)}
+                  >
+                    <SimpleSelectOption value="">— не задана —</SimpleSelectOption>
+                    {modelOptions.map((option) => (
+                      <SimpleSelectOption key={option} value={option}>
+                        {option}
+                      </SimpleSelectOption>
+                    ))}
+                  </SimpleSelect>
+                </div>
+              </div>
+              <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+                <Typography.Text css={{ width: 60 }}>grader</Typography.Text>
+                <div css={{ flex: 1 }}>
+                  <SimpleSelect
+                    id="zala-jobs-role-grader"
+                    componentId="zala.jobs.form.model_role.grader"
+                    value={roleGrader}
+                    onChange={({ target }) => setRoleGrader(target.value)}
+                  >
+                    <SimpleSelectOption value="">— не задана —</SimpleSelectOption>
+                    {modelOptions.map((option) => (
+                      <SimpleSelectOption key={option} value={option}>
+                        {option}
+                      </SimpleSelectOption>
+                    ))}
+                  </SimpleSelect>
+                </div>
+              </div>
+              <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+                <Typography.Text css={{ width: 60 }}>user</Typography.Text>
+                <div css={{ flex: 1 }}>
+                  <SimpleSelect
+                    id="zala-jobs-role-user"
+                    componentId="zala.jobs.form.model_role.user"
+                    value={roleUser}
+                    onChange={({ target }) => setRoleUser(target.value)}
+                  >
+                    <SimpleSelectOption value="">— не задана —</SimpleSelectOption>
+                    {modelOptions.map((option) => (
+                      <SimpleSelectOption key={option} value={option}>
+                        {option}
+                      </SimpleSelectOption>
+                    ))}
+                  </SimpleSelect>
+                </div>
+              </div>
             </div>
           </div>
 
