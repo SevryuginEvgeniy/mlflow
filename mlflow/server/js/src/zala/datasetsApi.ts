@@ -18,6 +18,10 @@ export interface ZalaDatasetSummary {
   channels: Record<string, number>;
   updatedAt: string;
   warnings: string[];
+  /** `local` — Inspect-JSON под data/; `external` — датасет inspect_evals. */
+  kind: 'local' | 'external';
+  /** Ревизия HF внешнего датасета (для локальных — null). */
+  revision: string | null;
 }
 
 /** Сэмпл датасета (SampleOut из zalabench-api). */
@@ -31,6 +35,8 @@ export interface ZalaSample {
 /** Детали датасета: summary + список сэмплов. */
 export interface ZalaDatasetDetail extends ZalaDatasetSummary {
   samplesList: ZalaSample[];
+  /** `true` — показаны только первые N сэмплов (внешний датасет). */
+  samplesTruncated: boolean;
 }
 
 /** Строка DatasetSummary в ответе сервиса (snake_case). */
@@ -42,6 +48,8 @@ interface RawDatasetSummary {
   channels: Record<string, number>;
   updated_at: string;
   warnings?: string[];
+  kind?: 'local' | 'external';
+  revision?: string | null;
 }
 
 /** Строка SampleOut в ответе сервиса (snake_case). */
@@ -55,6 +63,7 @@ interface RawSample {
 /** Детали в ответе сервиса (snake_case). */
 interface RawDatasetDetail extends RawDatasetSummary {
   samples_list?: RawSample[];
+  samples_truncated?: boolean;
 }
 
 /** snake_case -> camelCase (summary). */
@@ -66,6 +75,8 @@ const toDatasetSummary = (raw: RawDatasetSummary): ZalaDatasetSummary => ({
   channels: raw.channels ?? {},
   updatedAt: raw.updated_at,
   warnings: raw.warnings ?? [],
+  kind: raw.kind ?? 'local',
+  revision: raw.revision ?? null,
 });
 
 /** snake_case -> camelCase (sample). */
@@ -133,5 +144,6 @@ export const getDataset = async (name: string): Promise<ZalaDatasetDetail> => {
   return {
     ...toDatasetSummary(raw),
     samplesList: (raw.samples_list ?? []).map(toSample),
+    samplesTruncated: raw.samples_truncated ?? false,
   };
 };

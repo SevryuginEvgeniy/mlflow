@@ -118,6 +118,32 @@ const postJson = async <T>(url: string, body: unknown): Promise<T> => {
 };
 
 /**
+ * Человекочитаемое имя модели.
+ *
+ * Inspect пишет модель в формате провайдера (`openai-api/openai/GLM-CLUSTER`),
+ * а в UI нужен алиас шлюза (`GLM-CLUSTER`). Отрезаем префиксы провайдера:
+ * `openai-api/openai/`, `openai/`, `openai-api/`. Остальные форматы
+ * (`mockllm/model`) оставляем как есть — у них нет префикса-обёртки.
+ */
+const PROVIDER_PREFIXES = ['openai-api/openai/', 'openai-api/', 'openai/'];
+
+export const normalizeModelName = (raw: string | undefined | null): string => {
+  const value = (raw ?? '').trim();
+  if (!value) {
+    return '—';
+  }
+  for (const prefix of PROVIDER_PREFIXES) {
+    if (value.startsWith(prefix)) {
+      const rest = value.slice(prefix.length);
+      if (rest) {
+        return rest;
+      }
+    }
+  }
+  return value;
+};
+
+/**
  * Имя датасета прогона.
  *
  * Отдельного `params.dataset` в MLflow нет: `run_eval` кладёт имя внутрь
@@ -130,8 +156,13 @@ const resolveDatasetName = (params: Record<string, string>, tags: Record<string,
     return params['dataset'];
   }
   try {
-    const metadata = params['metadata'] ? JSON.parse(params['metadata']) : null;
-    const name = metadata?.zala_run_config?.dataset;
+    // `metadata` — JSON-строка; на случай будущего изменения контракта
+    // принимаем и готовый объект.
+    const raw: unknown = params['metadata'];
+    const metadata =
+      typeof raw === 'string' ? JSON.parse(raw) : raw && typeof raw === 'object' ? raw : null;
+    const name = (metadata as { zala_run_config?: { dataset?: unknown } } | null)?.zala_run_config
+      ?.dataset;
     if (typeof name === 'string' && name) {
       return name;
     }
@@ -158,7 +189,9 @@ export const searchZalaRuns = async (experimentId: string): Promise<ZalaRunSumma
     return {
       runId: run.info?.run_id ?? '',
       runName: run.info?.run_name || run.info?.run_id || '—',
-      model: params['model'] || params['zala.model'] || tags['zala.run_config.model'] || '—',
+      model: normalizeModelName(
+        params['model'] || params['zala.model'] || tags['zala.run_config.model'],
+      ),
       dataset: resolveDatasetName(params, tags),
       status: run.info?.status ?? '—',
       startTime: run.info?.start_time ?? 0,
@@ -204,6 +237,148 @@ export const searchZalaTraces = async (experimentId: string, filter?: string): P
 
 /** Экранирует значение для строкового литерала в фильтре MLflow. */
 export const quoteFilterValue = (value: string): string => `'${value.replace(/'/g, "\\'")}'`;
+
+// ---------------------------------------------------------------------------
+// Ф5.1 — ответы модели по сэмплам (трейсы Inspect)
+// ---------------------------------------------------------------------------
+
+/** Один шаг хронологии агентского сэмпла (tool call). */
+export interface ZalaToolCall {
+  function: string;
+  arguments: string;
+  result: string;
+  error: string | null;
+}
+
+/** Ответ модели на один сэмпл: вход, выход, оценка, reasoning, tool-calls. */
+export interface ZalaSample {
+  sampleId: string;
+  traceId: string;
+  input: string;
+  output: string;
+  /** Оценка скорера (первая из `scores` трейса), `null` — нет. */
+  score: number | null;
+  scoreName: string;
+  reasoning: string;
+  /** Хронология tool-calls (агентские таски); пусто — обычный сэмпл. */
+  toolCalls: ZalaToolCall[];
+}
+
+/** Спан трейса (только нужные поля; остальное MLflow отдаёт избыточно). */
+interface TraceSpan {
+  name?: string;
+  attributes?: Record<string, unknown>;
+}
+
+/** Разбор JSON-атрибута спана; битый/пустой -> null. */
+const parseAttr = (raw: unknown): Record<string, any> | null => {
+  if (typeof raw !== 'string' || !raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Reasoning из content ассистентского сообщения.
+ *
+ * Inspect сериализует content как repr списка частей:
+ * `["internal='reasoning' type='reasoning' reasoning='...' ...", ...]`.
+ * Достаём `reasoning='...'` регуляркой; нет — пустая строка.
+ */
+const extractReasoning = (content: unknown): string => {
+  const text = typeof content === 'string' ? content : '';
+  const match = /reasoning='((?:[^'\\]|\\.)*)'/.exec(text);
+  if (!match) return '';
+  return match[1].replace(/\\n/g, '\n').replace(/\\'/g, "'");
+};
+
+/** Один трейс -> ZalaSample. */
+const traceToSample = (trace: ZalaTrace, spans: TraceSpan[]): ZalaSample => {
+  let input = '';
+  let output = '';
+  let score: number | null = null;
+  let scoreName = '';
+  const toolCalls: ZalaToolCall[] = [];
+  const reasonings: string[] = [];
+
+  spans.forEach((span) => {
+    const name = span.name ?? '';
+    const attrs = span.attributes ?? {};
+    if (name.startsWith('sample.')) {
+      const inputs = parseAttr(attrs['mlflow.spanInputs']);
+      const outputs = parseAttr(attrs['mlflow.spanOutputs']);
+      input = typeof inputs?.['input'] === 'string' ? inputs['input'] : '';
+      output = typeof outputs?.['output'] === 'string' ? outputs['output'] : '';
+      const scores = outputs?.['scores'] as Record<string, { value?: unknown }> | undefined;
+      if (scores) {
+        const [firstKey] = Object.keys(scores);
+        if (firstKey) {
+          scoreName = firstKey;
+          const value = scores[firstKey]?.value;
+          score = typeof value === 'number' ? value : null;
+        }
+      }
+    } else if (name.startsWith('message.') && name.endsWith('.assistant')) {
+      const outputs = parseAttr(attrs['mlflow.spanOutputs']);
+      const reasoning = extractReasoning(outputs?.['content']);
+      if (reasoning) reasonings.push(reasoning);
+    } else if (name.startsWith('tool.') && name !== 'tool.submit') {
+      const inputs = parseAttr(attrs['mlflow.spanInputs']);
+      const outputs = parseAttr(attrs['mlflow.spanOutputs']);
+      toolCalls.push({
+        function: typeof inputs?.['function'] === 'string' ? inputs['function'] : name.slice(5),
+        arguments: typeof inputs?.['arguments'] === 'string' ? inputs['arguments'] : '',
+        result: typeof outputs?.['result'] === 'string' ? outputs['result'] : '',
+        error: typeof outputs?.['error'] === 'string' ? outputs['error'] : null,
+      });
+    }
+  });
+
+  return {
+    sampleId: trace.sampleId,
+    traceId: trace.traceId,
+    input,
+    output,
+    score,
+    scoreName,
+    reasoning: reasonings.join('\n\n'),
+    toolCalls,
+  };
+};
+
+/**
+ * Сэмплы прогона: трейсы по `inspect.eval_id` + разбор их спанов.
+ *
+ * Артефакт трейса тянется отдельным запросом на трейс; ошибка одного
+ * трейса не роняет список (сэмпл остаётся с пустыми полями).
+ */
+export const fetchRunSamples = async (
+  experimentId: string,
+  evalId: string,
+): Promise<ZalaSample[]> => {
+  if (!evalId) return [];
+  const traces = await searchZalaTraces(
+    experimentId,
+    `tags.\`inspect.eval_id\` = ${quoteFilterValue(evalId)}`,
+  );
+  return Promise.all(
+    traces.map(async (trace) => {
+      try {
+        const response = await fetch(
+          `/ajax-api/3.0/mlflow/get-trace-artifact?request_id=${encodeURIComponent(trace.traceId)}`,
+        );
+        if (!response.ok) return traceToSample(trace, []);
+        const payload = (await response.json()) as { spans?: TraceSpan[] };
+        return traceToSample(trace, payload.spans ?? []);
+      } catch {
+        return traceToSample(trace, []);
+      }
+    }),
+  );
+};
 
 // ---------------------------------------------------------------------------
 // Ф4.3 — каналы, штампы N-X, artifact metrics.json

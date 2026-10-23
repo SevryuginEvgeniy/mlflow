@@ -12,6 +12,7 @@ import {
   Alert,
   Button,
   Empty,
+  Modal,
   SimpleSelect,
   SimpleSelectOption,
   Spinner,
@@ -26,7 +27,7 @@ import {
 
 import type { ZalaDatasetDetail, ZalaDatasetSummary, ZalaSample } from './datasetsApi';
 import { getDataset, listDatasets } from './datasetsApi';
-import { ZalaApiError } from './jobsApi';
+import { ZalaApiError, getApiBase } from './jobsApi';
 
 /** Минимум сэмплов в канале для осмысленных метрик (как MIN_CHANNEL_SAMPLES). */
 const MIN_CHANNEL_SAMPLES = 5;
@@ -86,6 +87,203 @@ const ChannelBadges = ({ channels }: { channels: Record<string, number> }) => {
   );
 };
 
+/** Группа датасетов (локальные / внешние) с общей таблицей. */
+const DatasetGroup = ({
+  title,
+  hint,
+  items,
+  onOpen,
+}: {
+  title: string;
+  hint: string;
+  items: ZalaDatasetSummary[];
+  onOpen: (name: string) => void;
+}) => {
+  const { theme } = useDesignSystemTheme();
+  if (items.length === 0) {
+    return null;
+  }
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+      <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'baseline', flexWrap: 'wrap' }}>
+        <Typography.Title level={5} css={{ marginBottom: 0 }}>
+          {title}
+        </Typography.Title>
+        <Typography.Text color="secondary">{items.length}</Typography.Text>
+        <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+          {hint}
+        </Typography.Text>
+      </div>
+      <Table
+        scrollable
+        noMinHeight
+        css={{
+          border: `1px solid ${theme.colors.border}`,
+          borderRadius: theme.general.borderRadiusBase,
+          overflow: 'hidden',
+        }}
+      >
+        <TableRow isHeader>
+          <TableHeader componentId="zala.datasets.name_header" css={{ flex: 2 }}>
+            Имя
+          </TableHeader>
+          <TableHeader componentId="zala.datasets.kind_header" css={{ flex: 0.8 }}>
+            Тип
+          </TableHeader>
+          <TableHeader componentId="zala.datasets.hash_header" css={{ flex: 1.4 }}>
+            snapshot_hash
+          </TableHeader>
+          <TableHeader componentId="zala.datasets.samples_header" css={{ flex: 0.8 }}>
+            Сэмплов
+          </TableHeader>
+          <TableHeader componentId="zala.datasets.revision_header" css={{ flex: 1.6 }}>
+            Ревизия
+          </TableHeader>
+          <TableHeader componentId="zala.datasets.channels_header" css={{ flex: 2.6 }}>
+            Каналы
+          </TableHeader>
+          <TableHeader componentId="zala.datasets.updated_header" css={{ flex: 1.2 }}>
+            Обновлён
+          </TableHeader>
+          <TableHeader componentId="zala.datasets.warnings_header" css={{ flex: 2.2 }}>
+            Предупреждения
+          </TableHeader>
+          <TableHeader componentId="zala.datasets.actions_header" css={{ flex: 0.8 }}>
+            {' '}
+          </TableHeader>
+        </TableRow>
+        {items.map((item) => (
+          <TableRow key={item.name}>
+            <TableCell css={{ flex: 2 }}>
+              <Typography.Text>{item.name}</Typography.Text>
+              <div>
+                <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                  {item.path}
+                </Typography.Text>
+              </div>
+            </TableCell>
+            <TableCell css={{ flex: 0.8 }}>
+              {item.kind === 'external' ? (
+                <Tag componentId={`zala.datasets.kind.external.${item.name}`} color="lemon">
+                  HF
+                </Tag>
+              ) : (
+                <Tag componentId={`zala.datasets.kind.dev.${item.name}`} color="teal">
+                  dev
+                </Tag>
+              )}
+            </TableCell>
+            <TableCell css={{ flex: 1.4 }}>
+              <code title={item.snapshotHash}>{shortHash(item.snapshotHash)}</code>
+            </TableCell>
+            <TableCell css={{ flex: 0.8 }}>{item.samples}</TableCell>
+            <TableCell css={{ flex: 1.6 }}>
+              {item.revision ? (
+                <code title={item.revision}>{truncate(item.revision, 18)}</code>
+              ) : (
+                '—'
+              )}
+            </TableCell>
+            <TableCell css={{ flex: 2.6 }}>
+              <ChannelBadges channels={item.channels} />
+            </TableCell>
+            <TableCell css={{ flex: 1.2 }}>{formatDate(item.updatedAt)}</TableCell>
+            <TableCell css={{ flex: 2.2 }}>
+              {item.warnings.length === 0 ? (
+                '—'
+              ) : (
+                <div css={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {item.warnings.map((warning, index) => (
+                    <Typography.Text key={`${item.name}-${index}`} color="error">
+                      {warning}
+                    </Typography.Text>
+                  ))}
+                </div>
+              )}
+            </TableCell>
+            <TableCell css={{ flex: 0.8 }}>
+              <Button componentId={`zala.datasets.open.${item.name}`} onClick={() => onOpen(item.name)}>
+                Открыть
+              </Button>
+            </TableCell>
+          </TableRow>
+        ))}
+      </Table>
+    </div>
+  );
+};
+
+/** Тикет #9: модалка сэмпла — полный input/target с переносом и прокруткой. */
+const SampleModal = ({
+  sample,
+  truncated,
+  onClose,
+}: {
+  sample: ZalaSample | null;
+  truncated: boolean;
+  onClose: () => void;
+}) => {
+  const { theme } = useDesignSystemTheme();
+  if (!sample) {
+    return null;
+  }
+  const textStyle = {
+    margin: 0,
+    whiteSpace: 'pre-wrap' as const,
+    wordBreak: 'break-word' as const,
+    maxHeight: 320,
+    overflowY: 'auto' as const,
+    padding: theme.spacing.sm,
+    border: `1px solid ${theme.colors.border}`,
+    borderRadius: theme.general.borderRadiusBase,
+    backgroundColor: theme.colors.backgroundSecondary,
+    fontFamily: 'monospace',
+    fontSize: 12,
+  };
+  return (
+    <Modal
+      componentId="zala.datasets.sample_modal"
+      title={`Сэмпл ${sample.id}`}
+      visible={Boolean(sample)}
+      onCancel={onClose}
+      footer={null}
+      size="wide"
+    >
+      <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+        <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center', flexWrap: 'wrap' }}>
+          <Typography.Text color="secondary">task_type:</Typography.Text>
+          {sample.taskType ? (
+            <Tag componentId="zala.datasets.sample_modal.task">{sample.taskType}</Tag>
+          ) : (
+            <Tag componentId="zala.datasets.sample_modal.task_unknown" color="coral">
+              unknown
+            </Tag>
+          )}
+        </div>
+
+        {truncated && (
+          <Alert
+            componentId="zala.datasets.sample_modal.truncated"
+            type="info"
+            message="Список сэмплов неполный"
+            description="Внешний датасет: в UI загружены только первые сэмплы выборки MVP. Полный датасет грузится из HF при прогоне."
+          />
+        )}
+
+        <div>
+          <Typography.Text color="secondary">input</Typography.Text>
+          <pre css={textStyle}>{sample.input || '—'}</pre>
+        </div>
+
+        <div>
+          <Typography.Text color="secondary">target</Typography.Text>
+          <pre css={textStyle}>{sample.target || '—'}</pre>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
 /** Красная плашка о каналах с недостатком сэмплов (E6). */
 const SmallChannelAlert = ({ channels }: { channels: Record<string, number> }) => {
   const small = smallChannels(channels);
@@ -122,6 +320,9 @@ export const DatasetsPage = () => {
   // Фильтр по каналу и пагинация (E4).
   const [channelFilter, setChannelFilter] = useState<string>('all');
   const [page, setPage] = useState(0);
+
+  // Тикет #9: открытый сэмпл — модалка с полным input/target.
+  const [activeSample, setActiveSample] = useState<ZalaSample | null>(null);
 
   /** Загружает список датасетов; `initial` включает большой Spinner. */
   const refresh = useCallback(async (initial = false) => {
@@ -177,6 +378,7 @@ export const DatasetsPage = () => {
     setDetailError(null);
     setChannelFilter('all');
     setPage(0);
+    setActiveSample(null);
   }, []);
 
   /** Сэмплы после фильтра по каналу. */
@@ -203,6 +405,10 @@ export const DatasetsPage = () => {
   const detailWarnings = detail?.warnings ?? selectedSummary?.warnings ?? [];
   /** E3: датасет не читается — в warnings есть причина от реестра. */
   const detailBroken = detailWarnings.some((warning) => warning.startsWith('не читается'));
+
+  /** Локальные и внешние датасеты — раздельные группы списка. */
+  const localDatasets = useMemo(() => datasets.filter((item) => item.kind !== 'external'), [datasets]);
+  const externalDatasets = useMemo(() => datasets.filter((item) => item.kind === 'external'), [datasets]);
 
   /** Опции фильтра: все каналы датасета + `all`. */
   const channelOptions = useMemo(() => {
@@ -238,7 +444,7 @@ export const DatasetsPage = () => {
           componentId="zala.datasets.unavailable"
           type="error"
           message="Сервис недоступен"
-          description={loadError?.message || 'Проверьте, что zalabench-api запущен на 127.0.0.1:8000.'}
+          description={loadError?.message || `Проверьте, что zalabench-api запущен (${getApiBase()}).`}
           actions={[
             { componentId: 'zala.datasets.unavailable_retry', children: 'Повторить', onClick: () => refresh(true) },
           ]}
@@ -272,77 +478,20 @@ export const DatasetsPage = () => {
           ) : datasets.length === 0 ? (
             <Empty title="Датасетов нет" description="В каталоге data/ не найдено Inspect-JSON файлов." />
           ) : (
-            <Table
-              scrollable
-              noMinHeight
-              css={{
-                border: `1px solid ${theme.colors.border}`,
-                borderRadius: theme.general.borderRadiusBase,
-                overflow: 'hidden',
-              }}
-            >
-              <TableRow isHeader>
-                <TableHeader componentId="zala.datasets.name_header" css={{ flex: 2 }}>
-                  Имя
-                </TableHeader>
-                <TableHeader componentId="zala.datasets.hash_header" css={{ flex: 1.4 }}>
-                  snapshot_hash
-                </TableHeader>
-                <TableHeader componentId="zala.datasets.samples_header" css={{ flex: 0.8 }}>
-                  Сэмплов
-                </TableHeader>
-                <TableHeader componentId="zala.datasets.channels_header" css={{ flex: 3 }}>
-                  Каналы
-                </TableHeader>
-                <TableHeader componentId="zala.datasets.updated_header" css={{ flex: 1.4 }}>
-                  Обновлён
-                </TableHeader>
-                <TableHeader componentId="zala.datasets.warnings_header" css={{ flex: 2.5 }}>
-                  Предупреждения
-                </TableHeader>
-                <TableHeader componentId="zala.datasets.actions_header" css={{ flex: 0.8 }}>
-                  {' '}
-                </TableHeader>
-              </TableRow>
-              {datasets.map((item) => (
-                <TableRow key={item.name}>
-                  <TableCell css={{ flex: 2 }}>
-                    <Typography.Text>{item.name}</Typography.Text>
-                    <div>
-                      <Typography.Text color="secondary" css={{ fontSize: 12 }}>
-                        {item.path}
-                      </Typography.Text>
-                    </div>
-                  </TableCell>
-                  <TableCell css={{ flex: 1.4 }}>
-                    <code title={item.snapshotHash}>{shortHash(item.snapshotHash)}</code>
-                  </TableCell>
-                  <TableCell css={{ flex: 0.8 }}>{item.samples}</TableCell>
-                  <TableCell css={{ flex: 3 }}>
-                    <ChannelBadges channels={item.channels} />
-                  </TableCell>
-                  <TableCell css={{ flex: 1.4 }}>{formatDate(item.updatedAt)}</TableCell>
-                  <TableCell css={{ flex: 2.5 }}>
-                    {item.warnings.length === 0 ? (
-                      '—'
-                    ) : (
-                      <div css={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        {item.warnings.map((warning, index) => (
-                          <Typography.Text key={`${item.name}-${index}`} color="error">
-                            {warning}
-                          </Typography.Text>
-                        ))}
-                      </div>
-                    )}
-                  </TableCell>
-                  <TableCell css={{ flex: 0.8 }}>
-                    <Button componentId={`zala.datasets.open.${item.name}`} onClick={() => openDataset(item.name)}>
-                      Открыть
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </Table>
+            <>
+              <DatasetGroup
+                title="Локальные датасеты"
+                hint="Inspect-JSON из каталога data/"
+                items={localDatasets}
+                onOpen={openDataset}
+              />
+              <DatasetGroup
+                title="Внешние датасеты"
+                hint="inspect_evals: стратифицированные выборки MVP, данные грузятся из HF"
+                items={externalDatasets}
+                onOpen={openDataset}
+              />
+            </>
           )}
         </div>
       ) : (
@@ -355,6 +504,11 @@ export const DatasetsPage = () => {
             <Typography.Title level={4} css={{ marginBottom: 0 }}>
               {selectedName}
             </Typography.Title>
+            {detail?.kind === 'external' && (
+              <Tag componentId="zala.datasets.detail.kind_external" color="lemon">
+                HF · {detail.channels ? Object.keys(detail.channels).join(', ') : 'external'}
+              </Tag>
+            )}
             {detailLoading && <Spinner size="small" />}
           </div>
 
@@ -377,6 +531,16 @@ export const DatasetsPage = () => {
               message="Датасет не читается"
               description={detailWarnings.join('; ')}
               actions={[{ componentId: 'zala.datasets.broken_back', children: 'К списку', onClick: closeDetail }]}
+            />
+          )}
+
+          {/* HF недоступен: детали отдаются без сэмплов (Ф5 §10.3). */}
+          {!detailError && detail?.kind === 'external' && detailWarnings.length > 0 && (
+            <Alert
+              componentId="zala.datasets.hf_warning"
+              type="warning"
+              message="Внешний датасет"
+              description={detailWarnings.join('; ')}
             />
           )}
 
@@ -409,6 +573,14 @@ export const DatasetsPage = () => {
                 <Typography.Text color="secondary">Обновлён</Typography.Text>
                 <div>{formatDate(detail.updatedAt)}</div>
               </div>
+              {detail.revision && (
+                <div css={{ maxWidth: 280 }}>
+                  <Typography.Text color="secondary">Ревизия HF</Typography.Text>
+                  <div>
+                    <code>{detail.revision}</code>
+                  </div>
+                </div>
+              )}
               <div css={{ flex: '1 1 240px', minWidth: 0 }}>
                 <Typography.Text color="secondary">Путь</Typography.Text>
                 <div>
@@ -459,6 +631,9 @@ export const DatasetsPage = () => {
                   {filteredSamples.length}
                   {channelFilter !== 'all' ? ` из ${detail.samplesList.length}` : ''}
                 </Typography.Text>
+                <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                  Клик по строке открывает полный input и target.
+                </Typography.Text>
                 <div css={{ minWidth: 220 }}>
                   <Typography.Text color="secondary">Канал</Typography.Text>
                   <SimpleSelect
@@ -479,8 +654,24 @@ export const DatasetsPage = () => {
                 </div>
               </div>
 
+              {detail.samplesTruncated && (
+                <Alert
+                  componentId="zala.datasets.samples_truncated"
+                  type="info"
+                  message="Показаны первые сэмплы"
+                  description={`Внешний датасет: показаны первые ${detail.samplesList.length} сэмплов из ${detail.samples} в выборке MVP. Полный датасет загружается из HF при прогоне.`}
+                />
+              )}
+
               {visibleSamples.length === 0 ? (
-                <Empty title="Сэмплов нет" description="В выбранном канале нет сэмплов." />
+                <Empty
+                  title="Сэмплов нет"
+                  description={
+                    detail.kind === 'external'
+                      ? 'Не удалось загрузить сэмплы из HF (см. предупреждения выше).'
+                      : 'В выбранном канале нет сэмплов.'
+                  }
+                />
               ) : (
                 <Table
                   scrollable
@@ -506,7 +697,12 @@ export const DatasetsPage = () => {
                     </TableHeader>
                   </TableRow>
                   {visibleSamples.map((sample) => (
-                    <TableRow key={sample.id}>
+                    <TableRow
+                      key={sample.id}
+                      css={{ cursor: 'pointer' }}
+                      onClick={() => setActiveSample(sample)}
+                      aria-label={`Открыть сэмпл ${sample.id}`}
+                    >
                       <TableCell css={{ flex: 0.8 }}>
                         <code>{sample.id}</code>
                       </TableCell>
@@ -554,6 +750,13 @@ export const DatasetsPage = () => {
           )}
         </div>
       )}
+
+      {/* Тикет #9: полный сэмпл в модалке (Esc и клик вне окна — штатное закрытие Modal). */}
+      <SampleModal
+        sample={activeSample}
+        truncated={Boolean(detail?.samplesTruncated)}
+        onClose={() => setActiveSample(null)}
+      />
     </div>
   );
 };
