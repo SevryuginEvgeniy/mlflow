@@ -9,6 +9,8 @@
  * `experiment_ids` возвращает 0 результатов (проверено).
  */
 
+import { getAjaxUrl } from '../common/utils/FetchUtils';
+
 /** Сводка одного прогона для таблицы и деталей. */
 export interface ZalaRunSummary {
   runId: string;
@@ -18,6 +20,11 @@ export interface ZalaRunSummary {
   status: string;
   /** Время старта, мс с epoch (как отдаёт MLflow). */
   startTime: number;
+  /**
+   * id эксперимента прогона. Нужен в режиме «Все»: трейсы судьи лежат в
+   * эксперименте своего прогона, а не в выбранном в фильтре.
+   */
+  experimentId?: string;
   /** Все метрики прогона (ключ → значение), включая `zala.*`. */
   metrics: Record<string, number>;
   /** Все теги прогона (ключ → значение), включая `zala.*`. */
@@ -58,6 +65,7 @@ interface MlflowRun {
     run_name?: string;
     status?: string;
     start_time?: number;
+    experiment_id?: string;
   };
   data?: {
     metrics?: Array<{ key: string; value: number }>;
@@ -172,15 +180,43 @@ const resolveDatasetName = (params: Record<string, string>, tags: Record<string,
   return tags['zala.nx.dataset'] || tags['zala.dataset'] || '—';
 };
 
+/** Опции страницы прогонов (тикет #15: лимит и следующая страница). */
+export interface ZalaRunsQuery {
+  /** Размер страницы: 50 / 100 / 200. По умолчанию `ZALA_RUNS_LIMIT`. */
+  limit?: number;
+  /** Токен следующей страницы из предыдущего ответа (`next_page_token`). */
+  pageToken?: string;
+}
+
+/** Страница прогонов + токен следующей (null — список закончился). */
+export interface ZalaRunsPage {
+  runs: ZalaRunSummary[];
+  nextPageToken: string | null;
+}
+
 /**
- * Ищет прогоны эксперимента. Возвращает не больше `ZALA_RUNS_LIMIT` штук;
- * страница считает E5 по `runs.length >= ZALA_RUNS_LIMIT`.
+ * Ищет прогоны одного или нескольких экспериментов («Все» — один запрос
+ * со списком id, не склейка ответов: MLflow поддерживает `experiment_ids[]`).
+ *
+ * Пагинация — через `page_token` MLflow (offset-токен сервера): кнопка
+ * «Показать ещё» передаёт токен прошлой страницы.
  */
-export const searchZalaRuns = async (experimentId: string): Promise<ZalaRunSummary[]> => {
-  const payload = await postJson<{ runs?: MlflowRun[] }>('/api/2.0/mlflow/runs/search', {
-    experiment_ids: [experimentId],
-    max_results: ZALA_RUNS_LIMIT,
-  });
+export const searchZalaRuns = async (experimentIds: string[], query: ZalaRunsQuery = {}): Promise<ZalaRunsPage> => {
+  if (experimentIds.length === 0) {
+    return { runs: [], nextPageToken: null };
+  }
+  const body: {
+    experiment_ids: string[];
+    max_results: number;
+    page_token?: string;
+  } = {
+    experiment_ids: experimentIds,
+    max_results: query.limit ?? ZALA_RUNS_LIMIT,
+  };
+  if (query.pageToken) {
+    body.page_token = query.pageToken;
+  }
+  const payload = await postJson<{ runs?: MlflowRun[]; next_page_token?: string }>('/api/2.0/mlflow/runs/search', body);
   const rawRuns = payload.runs ?? [];
   const runs = rawRuns.map((run): ZalaRunSummary => {
     const metrics = keyValueToRecord(run.data?.metrics);
@@ -195,12 +231,13 @@ export const searchZalaRuns = async (experimentId: string): Promise<ZalaRunSumma
       dataset: resolveDatasetName(params, tags),
       status: run.info?.status ?? '—',
       startTime: run.info?.start_time ?? 0,
+      experimentId: run.info?.experiment_id,
       metrics,
       tags,
       params,
     };
   });
-  return runs;
+  return { runs, nextPageToken: payload.next_page_token || null };
 };
 
 /**
@@ -210,14 +247,18 @@ export const searchZalaRuns = async (experimentId: string): Promise<ZalaRunSumma
  * добавляется в payload как есть.
  */
 export const searchZalaTraces = async (experimentId: string, filter?: string): Promise<ZalaTrace[]> => {
-  const body: Record<string, unknown> = {
+  const body: {
+    locations: Array<{ type: string; mlflow_experiment: { experiment_id: string } }>;
+    max_results: number;
+    filter?: string;
+  } = {
     locations: [{ type: 'MLFLOW_EXPERIMENT', mlflow_experiment: { experiment_id: experimentId } }],
     max_results: ZALA_TRACES_LIMIT,
   };
   if (filter) {
-    body['filter'] = filter;
+    body.filter = filter;
   }
-  const payload = await postJson<{ traces?: MlflowTrace[] }>('/ajax-api/3.0/mlflow/traces/search', body);
+  const payload = await postJson<{ traces?: MlflowTrace[] }>(getAjaxUrl('ajax-api/3.0/mlflow/traces/search'), body);
   return (payload.traces ?? []).map((trace): ZalaTrace => {
     const tags = trace.tags ?? {};
     return {
@@ -368,7 +409,9 @@ export const fetchRunSamples = async (
     traces.map(async (trace) => {
       try {
         const response = await fetch(
-          `/ajax-api/3.0/mlflow/get-trace-artifact?request_id=${encodeURIComponent(trace.traceId)}`,
+          getAjaxUrl(
+            `ajax-api/3.0/mlflow/get-trace-artifact?request_id=${encodeURIComponent(trace.traceId)}`,
+          ),
         );
         if (!response.ok) return traceToSample(trace, []);
         const payload = (await response.json()) as { spans?: TraceSpan[] };

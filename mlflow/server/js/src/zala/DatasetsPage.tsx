@@ -77,7 +77,7 @@ const ChannelBadges = ({ channels }: { channels: Record<string, number> }) => {
       {entries.map(([channel, count]) => (
         <Tag
           key={channel}
-          componentId={`zala.datasets.channel.${channel}`}
+          componentId="zala.datasets.channel"
           color={count < MIN_CHANNEL_SAMPLES ? 'coral' : 'default'}
         >
           {channel}: {count}
@@ -164,11 +164,11 @@ const DatasetGroup = ({
             </TableCell>
             <TableCell css={{ flex: 0.8 }}>
               {item.kind === 'external' ? (
-                <Tag componentId={`zala.datasets.kind.external.${item.name}`} color="lemon">
+                <Tag componentId="zala.datasets.kind.external" color="lemon">
                   HF
                 </Tag>
               ) : (
-                <Tag componentId={`zala.datasets.kind.dev.${item.name}`} color="teal">
+                <Tag componentId="zala.datasets.kind.dev" color="teal">
                   dev
                 </Tag>
               )}
@@ -202,7 +202,7 @@ const DatasetGroup = ({
               )}
             </TableCell>
             <TableCell css={{ flex: 0.8 }}>
-              <Button componentId={`zala.datasets.open.${item.name}`} onClick={() => onOpen(item.name)}>
+              <Button componentId="zala.datasets.open" onClick={() => onOpen(item.name)}>
                 Открыть
               </Button>
             </TableCell>
@@ -712,7 +712,7 @@ export const DatasetsPage = () => {
                       <TableCell css={{ flex: 2 }}>{truncate(sample.target, INPUT_PREVIEW_CHARS)}</TableCell>
                       <TableCell css={{ flex: 1.2 }}>
                         {sample.taskType ? (
-                          <Tag componentId={`zala.datasets.sample_task.${sample.taskType}`}>{sample.taskType}</Tag>
+                          <Tag componentId="zala.datasets.sample_task">{sample.taskType}</Tag>
                         ) : (
                           <Tag componentId="zala.datasets.sample_task.unknown" color="coral">
                             unknown

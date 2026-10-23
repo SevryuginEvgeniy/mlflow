@@ -29,18 +29,17 @@ import {
 
 import { useSearchParams } from '../common/utils/RoutingUtils';
 import type { ZalaGroup } from './jobsApi';
-import { ZalaApiError, createJudgeJob, getGroup, listExperiments, listModels } from './jobsApi';
-import type { ZalaChannel, ZalaRunSummary, ZalaTrace } from './api';
+import type { ZalaRunSample } from './jobsApi';
+import { ZalaApiError, createJudgeJob, getGroup, getRunSamples, listExperiments, listModels } from './jobsApi';
+import type { ZalaChannel, ZalaRunSummary } from './api';
 import {
   ZALA_RUNS_LIMIT,
   channelsFromReport,
   compareStamps,
   fetchMetricsJson,
   parseChannels,
-  quoteFilterValue,
   readStamp,
   searchZalaRuns,
-  searchZalaTraces,
 } from './api';
 
 /** Имя эксперимента по умолчанию (Ф5.6); список берётся из GET /experiments. */
@@ -80,6 +79,15 @@ const DAY_PRESETS: Array<{ value: string; label: string; ms: number | null }> = 
 /** Значение «фильтр не задан» для селектов. */
 const ANY_VALUE = '__any__';
 
+/**
+ * Пункт «Все» в селекте экспериментов (тикет #15): один запрос со списком
+ * id всех экспериментов, а не склейка ответов по каждому.
+ */
+const ALL_EXPERIMENTS = '__all__';
+
+/** Варианты лимита страницы прогонов (тикет #15). */
+const RUNS_LIMIT_OPTIONS = [50, 100, 200];
+
 /** Одна строка таблицы метрик (значение + доверительный интервал + статус). */
 interface MetricRow {
   key: string;
@@ -87,6 +95,10 @@ interface MetricRow {
   ciLower?: number;
   ciUpper?: number;
   status?: string;
+  /** Тикет #13: n метрики (тег `.n`) — для `insufficient_data`. */
+  n?: string;
+  /** Тикет #13: почему метрики нет (тег `.reason`). */
+  reason?: string;
 }
 
 /** Состояние фильтров страницы (дублируется в URL query). */
@@ -130,6 +142,9 @@ const collectMetrics = (run: ZalaRunSummary, prefix: string): MetricRow[] => {
       ciLower: run.metrics[`${key}${CI_LOWER}`],
       ciUpper: run.metrics[`${key}${CI_UPPER}`],
       status: run.tags[`${key}${STATUS_SUFFIX}`],
+      // Тикет #13: сервис кладёт `.n` и `.reason` тегами для не-ok метрик.
+      n: run.tags[`${key}.n`],
+      reason: run.tags[`${key}.reason`],
     }));
 };
 
@@ -158,43 +173,106 @@ const StatusBadge = ({ status }: { status?: string }) => {
   );
 };
 
-/** Таблица метрик одного прогона (используется и в сравнении). */
-const MetricsTable = ({ run, prefix, componentId }: { run: ZalaRunSummary; prefix: string; componentId: string }) => {
+/** Пояснение к статусу метрики: n и причина (тикет #13). */
+const statusExplanation = (row: MetricRow): string => {
+  if (!row.status || row.status === 'ok') {
+    return '';
+  }
+  if (row.status === 'insufficient_data') {
+    return [row.n ? `n=${row.n}` : null, row.reason || 'порог не достигнут'].filter(Boolean).join(', ');
+  }
+  return row.reason || '';
+};
+
+/**
+ * Таблица метрик одного прогона (используется и в сравнении).
+ *
+ * Тикет #13: метрики без значения скрыты по умолчанию — иначе 11 строк
+ * `not_applicable` с прочерком прячут 17 реальных значений. Тумблер
+ * «показать все» возвращает их вместе с n и пояснением, почему метрики нет.
+ */
+const MetricsTable = ({
+  run,
+  prefix,
+  componentId,
+  exclude,
+}: {
+  run: ZalaRunSummary;
+  prefix: string;
+  componentId: string;
+  /** Под-префиксы, которые в блок не входят (шумные per-sample метрики). */
+  exclude?: string[];
+}) => {
   const { theme } = useDesignSystemTheme();
-  const rows = collectMetrics(run, prefix);
+  const [showAll, setShowAll] = useState(false);
+  const rows = useMemo(
+    () =>
+      collectMetrics(run, prefix).filter(
+        (row) => !(exclude ?? []).some((skip) => row.key.startsWith(skip)),
+      ),
+    [run, prefix, exclude],
+  );
+  const visibleRows = showAll ? rows : rows.filter((row) => row.value !== undefined);
+  const hiddenCount = rows.length - visibleRows.length;
+
+  if (rows.length === 0) {
+    return null;
+  }
 
   return (
-    <Table
-      noMinHeight
-      css={{
-        border: `1px solid ${theme.colors.border}`,
-        borderRadius: theme.general.borderRadiusBase,
-        overflow: 'hidden',
-      }}
-    >
-      <TableRow isHeader>
-        <TableHeader componentId={`${componentId}.metric_header`} css={{ flex: 2 }}>
-          Метрика
-        </TableHeader>
-        <TableHeader componentId={`${componentId}.value_header`} css={{ flex: 2 }}>
-          Значение [CI]
-        </TableHeader>
-        <TableHeader componentId={`${componentId}.status_header`} css={{ flex: 1 }}>
-          Статус
-        </TableHeader>
-      </TableRow>
-      {rows.map((row) => (
-        <TableRow key={row.key}>
-          <TableCell css={{ flex: 2 }}>
-            <code>{row.key.slice(prefix.length)}</code>
-          </TableCell>
-          <TableCell css={{ flex: 2 }}>{formatMetric(row)}</TableCell>
-          <TableCell css={{ flex: 1 }}>
-            <StatusBadge status={row.status} />
-          </TableCell>
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+      <Table
+        noMinHeight
+        css={{
+          border: `1px solid ${theme.colors.border}`,
+          borderRadius: theme.general.borderRadiusBase,
+          overflow: 'hidden',
+        }}
+      >
+        <TableRow isHeader>
+          <TableHeader componentId={`${componentId}.metric_header`} css={{ flex: 2 }}>
+            Метрика
+          </TableHeader>
+          <TableHeader componentId={`${componentId}.value_header`} css={{ flex: 2 }}>
+            Значение [CI]
+          </TableHeader>
+          <TableHeader componentId={`${componentId}.status_header`} css={{ flex: 2 }}>
+            Статус
+          </TableHeader>
         </TableRow>
-      ))}
-    </Table>
+        {visibleRows.map((row) => {
+          const explanation = statusExplanation(row);
+          return (
+            <TableRow key={row.key}>
+              <TableCell css={{ flex: 2 }}>
+                <code>{row.key.slice(prefix.length)}</code>
+              </TableCell>
+              <TableCell css={{ flex: 2 }}>{formatMetric(row)}</TableCell>
+              <TableCell css={{ flex: 2 }}>
+                <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <StatusBadge status={row.status} />
+                  {explanation && (
+                    <Typography.Text color="secondary" size="sm">
+                      {explanation}
+                    </Typography.Text>
+                  )}
+                </div>
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </Table>
+      {hiddenCount > 0 || showAll ? (
+        <Button
+          componentId={`${componentId}.toggle_all`}
+          type="link"
+          onClick={() => setShowAll((prev) => !prev)}
+          aria-expanded={showAll}
+        >
+          {showAll ? 'Скрыть метрики без значения' : `Показать все (${hiddenCount} без значения)`}
+        </Button>
+      ) : null}
+    </div>
   );
 };
 
@@ -274,10 +352,38 @@ const ChannelTable = ({ channels }: { channels: ZalaChannel[] }) => {
   );
 };
 
-/** Список вердиктов по сэмплам выбранного прогона. */
-const VerdictsBlock = ({ run, experimentId }: { run: ZalaRunSummary; experimentId: string }) => {
+/** Вердикт штатного scorer'а словами: «C (0.8)», «0.43» или «—». */
+const formatScorerVerdict = (sample: ZalaRunSample): string => {
+  const raw = sample.verdict;
+  if (raw && typeof raw === 'object' && 'score' in (raw as Record<string, unknown>)) {
+    const label = String((raw as Record<string, unknown>)['score']);
+    return sample.score !== null ? `${label} (${formatNumber(sample.score)})` : label;
+  }
+  if (sample.score !== null) {
+    return formatNumber(sample.score);
+  }
+  return raw === null || raw === undefined ? '—' : String(raw);
+};
+
+/** Строка «токены судьи»: «1 000 / 40» или прочерк, если судейства не было. */
+const formatJudgeTokens = (sample: ZalaRunSample): string => {
+  if (sample.judgeInputTokens === null && sample.judgeOutputTokens === null) {
+    return '—';
+  }
+  return `${sample.judgeInputTokens ?? 0} / ${sample.judgeOutputTokens ?? 0}`;
+};
+
+/**
+ * Вердикты по сэмплам: оба вердикта рядом (тикет #12) и токены судьи (#18).
+ *
+ * Источник — `GET /runs/{id}/samples`: вердикт штатного scorer'а
+ * (`score`/`verdict`) и вердикт нашего судьи (`judgeScore` 0..10 +
+ * `judgeRationale`) из аудита `judge_calls.jsonl`, плюс токены судьи —
+ * в `inspect.tokens` они не попадают. `null` = «не оценивалось», не ноль.
+ */
+const VerdictsBlock = ({ run }: { run: ZalaRunSummary }) => {
   const { theme } = useDesignSystemTheme();
-  const [traces, setTraces] = useState<ZalaTrace[]>([]);
+  const [samples, setSamples] = useState<ZalaRunSample[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -285,33 +391,22 @@ const VerdictsBlock = ({ run, experimentId }: { run: ZalaRunSummary; experimentI
   const [isBlockOpen, setIsBlockOpen] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
 
-  const evalId = run.params?.['eval_id'];
-
   useEffect(() => {
     let cancelled = false;
     setExpanded(new Set());
     setIsBlockOpen(false);
-    if (!evalId) {
-      setTraces([]);
-      setError(null);
-      return () => {
-        cancelled = true;
-      };
-    }
     setIsLoading(true);
     setError(null);
-    // Фильтр по eval_id прогона: трейсы судьи к этому прогону не относятся.
-    const filter = `tags.\`inspect.eval_id\` = ${quoteFilterValue(evalId)}`;
-    searchZalaTraces(experimentId, filter)
+    getRunSamples(run.runId)
       .then((result) => {
         if (!cancelled) {
-          setTraces(result);
+          setSamples(result);
         }
       })
       .catch((e: unknown) => {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : String(e));
-          setTraces([]);
+          setSamples([]);
         }
       })
       .finally(() => {
@@ -322,12 +417,8 @@ const VerdictsBlock = ({ run, experimentId }: { run: ZalaRunSummary; experimentI
     return () => {
       cancelled = true;
     };
-  }, [evalId, reloadToken, experimentId]);
+  }, [run.runId, reloadToken]);
 
-  // E4: трейсов нет — блок скрыт.
-  if (!evalId) {
-    return null;
-  }
   if (isLoading) {
     return (
       <div css={{ display: 'flex', gap: theme.spacing.sm, padding: theme.spacing.md, alignItems: 'center' }}>
@@ -347,17 +438,17 @@ const VerdictsBlock = ({ run, experimentId }: { run: ZalaRunSummary; experimentI
       />
     );
   }
-  if (traces.length === 0) {
+  if (samples.length === 0) {
     return null;
   }
 
-  const toggle = (traceId: string) => {
+  const toggle = (sampleId: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(traceId)) {
-        next.delete(traceId);
+      if (next.has(sampleId)) {
+        next.delete(sampleId);
       } else {
-        next.add(traceId);
+        next.add(sampleId);
       }
       return next;
     });
@@ -372,83 +463,103 @@ const VerdictsBlock = ({ run, experimentId }: { run: ZalaRunSummary; experimentI
           onClick={() => setIsBlockOpen((prev) => !prev)}
           aria-expanded={isBlockOpen}
         >
-          {isBlockOpen ? 'Свернуть' : 'Развернуть'} ({traces.length} сэмплов)
+          {isBlockOpen ? 'Свернуть' : 'Развернуть'} ({samples.length} сэмплов)
         </Button>
       </div>
       {isBlockOpen && (
-    <Table
-      noMinHeight
-      css={{
-        border: `1px solid ${theme.colors.border}`,
-        borderRadius: theme.general.borderRadiusBase,
-        overflow: 'hidden',
-      }}
-    >
-      <TableRow isHeader>
-        <TableHeader componentId="zala.verdicts.sample_header" css={{ flex: 2 }}>
-          Сэмпл
-        </TableHeader>
-        <TableHeader componentId="zala.verdicts.count_header" css={{ flex: 1 }}>
-          Вердиктов
-        </TableHeader>
-        <TableHeader componentId="zala.verdicts.source_header" css={{ flex: 2 }}>
-          Судья
-        </TableHeader>
-        <TableHeader componentId="zala.verdicts.rationale_header" css={{ flex: 4 }}>
-          Вердикт
-        </TableHeader>
-      </TableRow>
-      {traces.map((trace) => {
-        const isOpen = expanded.has(trace.traceId);
-        const sources = Array.from(new Set(trace.assessments.map((a) => a.sourceId))).join(', ');
-        return (
-          <Fragment key={trace.traceId}>
-            <TableRow
-              css={{ cursor: 'pointer' }}
-              onClick={() => toggle(trace.traceId)}
-              aria-expanded={isOpen}
-            >
-              <TableCell css={{ flex: 2 }}>
-                <Typography.Text>{trace.sampleId}</Typography.Text>
-              </TableCell>
-              <TableCell css={{ flex: 1 }}>{trace.assessments.length}</TableCell>
-              <TableCell css={{ flex: 2 }}>{sources || '—'}</TableCell>
-              <TableCell css={{ flex: 4 }}>
-                <Typography.Text color="secondary">{isOpen ? 'Свернуть' : 'Показать rationale'}</Typography.Text>
-              </TableCell>
-            </TableRow>
-            {isOpen && (
-              <TableRow>
-                <TableCell css={{ flex: 9, display: 'block' }} wrapContent={false}>
-                  {trace.assessments.length === 0 ? (
-                    <Typography.Text color="secondary">Вердиктов нет</Typography.Text>
-                  ) : (
-                    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.sm }}>
-                      {trace.assessments.map((assessment, index) => (
-                        <div key={`${assessment.name}-${index}`} css={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                          <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center' }}>
-                            <strong>{assessment.name}</strong>
-                            <Tag componentId="zala.verdict.value" color="indigo">
-                              {assessment.value !== null ? formatNumber(assessment.value) : '—'}
-                            </Tag>
-                            <Typography.Text color="secondary">
-                              {assessment.sourceType} · {assessment.sourceId}
+        <Table
+          noMinHeight
+          css={{
+            border: `1px solid ${theme.colors.border}`,
+            borderRadius: theme.general.borderRadiusBase,
+            overflow: 'hidden',
+          }}
+        >
+          <TableRow isHeader>
+            <TableHeader componentId="zala.verdicts.sample_header" css={{ flex: 2 }}>
+              Сэмпл
+            </TableHeader>
+            <TableHeader componentId="zala.verdicts.scorer_header" css={{ flex: 2 }}>
+              Scorer (C/I/N или доля)
+            </TableHeader>
+            <TableHeader componentId="zala.verdicts.judge_header" css={{ flex: 2 }}>
+              Судья (0–10)
+            </TableHeader>
+            <TableHeader componentId="zala.verdicts.tokens_header" css={{ flex: 2 }}>
+              Токены судьи (вход / выход)
+            </TableHeader>
+            <TableHeader componentId="zala.verdicts.rationale_header" css={{ flex: 2 }}>
+              Обоснование
+            </TableHeader>
+          </TableRow>
+          {samples.map((sample) => {
+            const isOpen = expanded.has(sample.sampleId);
+            return (
+              <Fragment key={sample.sampleId}>
+                <TableRow
+                  css={{ cursor: 'pointer' }}
+                  onClick={() => toggle(sample.sampleId)}
+                  aria-expanded={isOpen}
+                >
+                  <TableCell css={{ flex: 2 }}>
+                    <Typography.Text>{sample.sampleId}</Typography.Text>
+                  </TableCell>
+                  <TableCell css={{ flex: 2 }}>{formatScorerVerdict(sample)}</TableCell>
+                  <TableCell css={{ flex: 2 }}>
+                    {sample.judgeScore !== null ? (
+                      <Tag componentId="zala.verdicts.judge_score" color="indigo">
+                        {sample.judgeScore}
+                      </Tag>
+                    ) : (
+                      <Typography.Text color="secondary">не оценивалось</Typography.Text>
+                    )}
+                  </TableCell>
+                  <TableCell css={{ flex: 2 }}>{formatJudgeTokens(sample)}</TableCell>
+                  <TableCell css={{ flex: 2 }}>
+                    <Typography.Text color="secondary">{isOpen ? 'Свернуть' : 'Показать'}</Typography.Text>
+                  </TableCell>
+                </TableRow>
+                {isOpen && (
+                  <TableRow>
+                    <TableCell css={{ flex: 10, display: 'block' }} wrapContent={false}>
+                      <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.sm }}>
+                        <div css={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          <strong>Судья{sample.judgeKind ? ` (${sample.judgeKind})` : ''}</strong>
+                          {sample.judgeScore !== null ? (
+                            <Typography.Text>
+                              {sample.judgeScore} / 10 — {sample.judgeRationale || 'без обоснования'}
                             </Typography.Text>
-                          </div>
-                          {assessment.rationale && (
-                            <Typography.Paragraph css={{ margin: 0 }}>{assessment.rationale}</Typography.Paragraph>
+                          ) : (
+                            <Typography.Text color="secondary">Судейство не проводилось</Typography.Text>
                           )}
                         </div>
-                      ))}
-                    </div>
-                  )}
-                </TableCell>
-              </TableRow>
-            )}
-          </Fragment>
-        );
-      })}
-    </Table>
+                        <div css={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          <strong>Scorer{sample.scorerName ? ` (${sample.scorerName})` : ''}</strong>
+                          <Typography.Text>{formatScorerVerdict(sample)}</Typography.Text>
+                          {sample.explanation && (
+                            <Typography.Paragraph css={{ margin: 0 }}>{sample.explanation}</Typography.Paragraph>
+                          )}
+                        </div>
+                        {sample.target && (
+                          <div css={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            <strong>Эталон</strong>
+                            <Typography.Paragraph css={{ margin: 0 }}>{sample.target}</Typography.Paragraph>
+                          </div>
+                        )}
+                        <div css={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          <strong>Ответ модели</strong>
+                          <Typography.Paragraph css={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+                            {sample.output}
+                          </Typography.Paragraph>
+                        </div>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </Fragment>
+            );
+          })}
+        </Table>
       )}
     </div>
   );
@@ -1027,6 +1138,10 @@ export const ZalaPage = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  // Тикет #15: страница прогонов — лимит (50/100/200) и токен следующей.
+  const [runsLimit, setRunsLimit] = useState<number>(ZALA_RUNS_LIMIT);
+  const [nextPageToken, setNextPageToken] = useState<string | null>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [experiments, setExperiments] = useState<{ name: string; experimentId: string }[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [compareRunId, setCompareRunId] = useState<string | null>(null);
@@ -1063,35 +1178,49 @@ export const ZalaPage = () => {
     };
   }, []);
 
-  /** id выбранного эксперимента: по имени из URL, иначе zalabench/первый. */
-  const activeExperimentId = useMemo(() => {
+  /**
+   * id экспериментов для запроса (тикет #15): «Все» — список всех id одним
+   * запросом; иначе — один выбранный (по имени из URL, иначе zalabench/первый).
+   */
+  const activeExperimentIds = useMemo(() => {
+    if (filters.experiment === ALL_EXPERIMENTS) {
+      return experiments.map((item) => item.experimentId);
+    }
     const match = experiments.find((item) => item.name === filters.experiment);
     if (match) {
-      return match.experimentId;
+      return [match.experimentId];
     }
     const fallback =
       experiments.find((item) => item.name === DEFAULT_EXPERIMENT_NAME) ?? experiments[0];
-    return fallback?.experimentId ?? '';
+    return fallback ? [fallback.experimentId] : [];
   }, [experiments, filters.experiment]);
+
+  // Ключ эксперимента: стабильная строка, чтобы эффект не перезапускался
+  // на каждый новый массив из useMemo.
+  const experimentKey = activeExperimentIds.join(',');
 
   useEffect(() => {
     let cancelled = false;
     setIsLoading(true);
     setError(null);
-    if (!activeExperimentId) {
+    setNextPageToken(null);
+    if (!experimentKey) {
       // Эксперименты ещё не загружены — ждём, чтобы не ходить в MLflow наугад.
       return () => {
         cancelled = true;
       };
     }
-    searchZalaRuns(activeExperimentId)
-      .then((result) => {
+    searchZalaRuns(experimentKey.split(','), { limit: runsLimit })
+      .then((page) => {
         if (cancelled) {
           return;
         }
-        setRuns(result);
+        setRuns(page.runs);
+        setNextPageToken(page.nextPageToken);
         // По умолчанию выбираем первый (самый свежий) прогон.
-        setSelectedRunId((prev) => (prev && result.some((r) => r.runId === prev) ? prev : result[0]?.runId ?? null));
+        setSelectedRunId((prev) =>
+          prev && page.runs.some((r) => r.runId === prev) ? prev : page.runs[0]?.runId ?? null,
+        );
       })
       .catch((e: unknown) => {
         if (!cancelled) {
@@ -1107,7 +1236,30 @@ export const ZalaPage = () => {
     return () => {
       cancelled = true;
     };
-  }, [reloadToken, activeExperimentId]);
+  }, [reloadToken, experimentKey, runsLimit]);
+
+  /** «Показать ещё»: догружает следующую страницу и дописывает её к таблице. */
+  const loadMoreRuns = useCallback(() => {
+    if (!nextPageToken || isLoadingMore || !experimentKey) {
+      return;
+    }
+    setIsLoadingMore(true);
+    searchZalaRuns(experimentKey.split(','), { limit: runsLimit, pageToken: nextPageToken })
+      .then((page) => {
+        setRuns((prev) => {
+          // Защита от дублей, если страница сдвинулась (новый run сверху).
+          const seen = new Set(prev.map((run) => run.runId));
+          return [...prev, ...page.runs.filter((run) => !seen.has(run.runId))];
+        });
+        setNextPageToken(page.nextPageToken);
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        setIsLoadingMore(false);
+      });
+  }, [nextPageToken, isLoadingMore, experimentKey, runsLimit]);
 
   // Уникальные значения для селектов фильтров.
   const modelOptions = useMemo(
@@ -1153,6 +1305,9 @@ export const ZalaPage = () => {
 
   const staticMetrics = selectedRun ? collectMetrics(selectedRun, 'zala.metric.') : [];
   const judgeMetrics = selectedRun ? collectMetrics(selectedRun, 'zala.judge.') : [];
+  // Тикет #13: отдельные блоки для производительности и метрик Inspect.
+  const perfMetrics = selectedRun ? collectMetrics(selectedRun, 'zala.perf.') : [];
+  const inspectMetrics = selectedRun ? collectMetrics(selectedRun, 'inspect.') : [];
 
   const selectRun = useCallback((runId: string) => {
     setSelectedRunId(runId);
@@ -1252,6 +1407,10 @@ export const ZalaPage = () => {
                   value={filters.experiment}
                   onChange={({ target }) => updateFilters({ experiment: target.value })}
                 >
+                  {/* Тикет #15: «Все» — один запрос со списком всех id. */}
+                  {experiments.length > 0 && (
+                    <SimpleSelectOption value={ALL_EXPERIMENTS}>Все</SimpleSelectOption>
+                  )}
                   {experiments.length === 0 ? (
                     <SimpleSelectOption value={DEFAULT_EXPERIMENT_NAME}>
                       {DEFAULT_EXPERIMENT_NAME}
@@ -1263,6 +1422,24 @@ export const ZalaPage = () => {
                       </SimpleSelectOption>
                     ))
                   )}
+                </SimpleSelect>
+              </div>
+              {/* Тикет #15: лимит страницы — над таблицей. */}
+              <div css={{ flex: '0 0 110px', minWidth: 100 }}>
+                <Typography.Text color="secondary" size="sm">
+                  На странице
+                </Typography.Text>
+                <SimpleSelect
+                  id="zala-filter-limit"
+                  componentId="zala.filters.limit"
+                  value={String(runsLimit)}
+                  onChange={({ target }) => setRunsLimit(Number(target.value))}
+                >
+                  {RUNS_LIMIT_OPTIONS.map((option) => (
+                    <SimpleSelectOption key={option} value={String(option)}>
+                      {option}
+                    </SimpleSelectOption>
+                  ))}
                 </SimpleSelect>
               </div>
               <div css={{ flex: '1 1 140px', minWidth: 120 }}>
@@ -1362,6 +1539,7 @@ export const ZalaPage = () => {
               </Button>
               <Typography.Paragraph color="secondary" css={{ marginBottom: 0 }}>
                 Показано {filteredRuns.length} из {runs.length}
+                {nextPageToken ? ' загруженных' : ''}
                 {hasFilters && (
                   <Typography.Link
                     componentId="zala.filters.reset"
@@ -1478,6 +1656,20 @@ export const ZalaPage = () => {
                 })}
               </Table>
             )}
+
+            {/* Тикет #15: догрузка следующей страницы. Кнопка исчезает,
+                когда MLflow не вернул next_page_token (конец списка). */}
+            {nextPageToken && (
+              <div css={{ display: 'flex', justifyContent: 'center', marginTop: theme.spacing.sm }}>
+                <Button
+                  componentId="zala.runs.load_more"
+                  onClick={loadMoreRuns}
+                  disabled={isLoadingMore}
+                >
+                  {isLoadingMore ? 'Загрузка…' : 'Показать ещё'}
+                </Button>
+              </div>
+            )}
           </div>
 
           {/* Правая колонка — детали выбранного прогона. */}
@@ -1526,10 +1718,32 @@ export const ZalaPage = () => {
                   </div>
                 )}
 
+                {/* Тикет #13: латентность/throughput/retry/queue wait. */}
+                {perfMetrics.length > 0 && (
+                  <div>
+                    <Typography.Title level={5}>Производительность</Typography.Title>
+                    <MetricsTable run={selectedRun} prefix="zala.perf." componentId="zala.metrics.perf" />
+                  </div>
+                )}
+
+                {/* Тикет #13: accuracy/samples/токены/usage по моделям.
+                    Per-sample `inspect.sample.*` — шум на 100 сэмплов, исключён. */}
+                {inspectMetrics.length > 0 && (
+                  <div>
+                    <Typography.Title level={5}>Inspect</Typography.Title>
+                    <MetricsTable
+                      run={selectedRun}
+                      prefix="inspect."
+                      componentId="zala.metrics.inspect"
+                      exclude={['inspect.sample.']}
+                    />
+                  </div>
+                )}
+
                 {/* Тикет #14: блок «Ответы модели» удалён — те же данные есть в MLflow. */}
                 <div>
                   <Typography.Title level={5}>Вердикты по сэмплам</Typography.Title>
-                  <VerdictsBlock run={selectedRun} experimentId={activeExperimentId} />
+                  <VerdictsBlock run={selectedRun} />
                 </div>
 
                 {/* Ф5.1: модалка судейства (job с task="judge"). */}

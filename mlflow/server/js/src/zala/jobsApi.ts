@@ -36,6 +36,9 @@ const defaultApiBase = (): string => {
 /** Текущий базовый URL (localStorage читается на каждый запрос). */
 export const getApiBase = (): string => {
   try {
+    // Ключ намеренно плоский (`zala.apiBase`), а не `useLocalStorage`-формат
+    // с версией: переопределение задаётся вручную из консоли/доков.
+    // eslint-disable-next-line @databricks/no-direct-storage -- ручной override вне React
     return localStorage.getItem('zala.apiBase') || defaultApiBase();
   } catch {
     // localStorage может быть недоступен (приватный режим) — берём дефолт.
@@ -80,6 +83,13 @@ export interface ZalaJob {
   timeLimitS: number | null;
   /** Ф5.8e: роли моделей (`judge`/`grader`/`user`) -> кластерный алиас. */
   modelRoles: Record<string, string>;
+  /**
+   * Ф5.8d S2 (#20): сколько pending-задач того же кластера впереди.
+   *
+   * Ненулевое значение у pending judge-job значит «кластер-судья занят»:
+   * оценка появится после этих задач.
+   */
+  queueAhead: number;
 }
 
 /** Тело POST /jobs (JobCreate). */
@@ -116,6 +126,14 @@ export interface ZalaJudgeCreate {
   kinds: Array<'single' | 'pairwise' | 'trajectory'>;
   referenceRunId?: string;
   experiment?: string;
+  /**
+   * Ф5.8d S1 (#19): разрешить судье оценивать собственный прогон.
+   *
+   * По умолчанию сервис отвечает 422 при совпадении судьи с моделью
+   * прогона. `true` — job ставится, имя модели вычищается из промпта,
+   * вердикты помечаются `zala.judge.self` и в рейтинг не идут.
+   */
+  allowSelfJudge?: boolean;
 }
 
 /** Оценка длительности (GET /estimate). */
@@ -151,6 +169,7 @@ interface RawJob {
   priority?: number;
   time_limit_s?: number | null;
   model_roles?: Record<string, string>;
+  queue_ahead?: number;
 }
 
 /** snake_case -> camelCase. */
@@ -174,6 +193,7 @@ const toZalaJob = (raw: RawJob): ZalaJob => ({
   priority: raw.priority ?? 0,
   timeLimitS: raw.time_limit_s ?? null,
   modelRoles: raw.model_roles ?? {},
+  queueAhead: raw.queue_ahead ?? 0,
 });
 
 /**
@@ -183,7 +203,8 @@ const toZalaJob = (raw: RawJob): ZalaJob => ({
  * или списком (422). Текст ошибки берём из `detail` (E4: 409 показывает его).
  */
 const request = async <T>(path: string, init?: RequestInit, token?: string): Promise<T> => {
-  const headers: Record<string, string> = { ...((init?.headers as Record<string, string>) ?? {}) };
+  const headers: Record<string, string> = {};
+  Object.assign(headers, (init?.headers as Record<string, string>) ?? {});
   if (init?.body !== undefined) {
     headers['Content-Type'] = 'application/json';
   }
@@ -262,10 +283,9 @@ const toLocalIso = (value: string): string => {
 
 /** Поставить job в очередь. */
 export const createJob = async (payload: ZalaJobCreate, token: string): Promise<ZalaJob> => {
-  const body: Record<string, unknown> = {
-    task: payload.task,
-    model: payload.model,
-  };
+  const body: Record<string, unknown> = {};
+  body['task'] = payload.task;
+  body['model'] = payload.model;
   if (payload.dataset !== undefined) {
     body['dataset'] = payload.dataset;
   }
@@ -388,14 +408,13 @@ export const createGroupJobs = async (
   payload: Omit<ZalaJobCreate, 'task' | 'dataset'> & { datasets: string[] },
   token: string,
 ): Promise<{ groupId: string; jobs: ZalaJob[] }> => {
-  const body: Record<string, unknown> = {
-    // `task`/`dataset` сервис игнорирует при непустом `datasets`, но
-    // JobCreate требует их присутствия (Pydantic) — шлём первый датасет.
-    task: payload.datasets[0] ?? '',
-    dataset: payload.datasets[0] ?? '',
-    datasets: payload.datasets,
-    model: payload.model,
-  };
+  const body: Record<string, unknown> = {};
+  // `task`/`dataset` сервис игнорирует при непустом `datasets`, но
+  // JobCreate требует их присутствия (Pydantic) — шлём первый датасет.
+  body['task'] = payload.datasets[0] ?? '';
+  body['dataset'] = payload.datasets[0] ?? '';
+  body['datasets'] = payload.datasets;
+  body['model'] = payload.model;
   if (payload.seed !== undefined) {
     body['seed'] = payload.seed;
   }
@@ -450,16 +469,18 @@ export const createJudgeJob = async (
   payload: ZalaJudgeCreate,
   token: string,
 ): Promise<ZalaJob> => {
-  const body: Record<string, unknown> = {
-    run_id: payload.runId,
-    judge_model: payload.judgeModel,
-    kinds: payload.kinds,
-  };
+  const body: Record<string, unknown> = {};
+  body['run_id'] = payload.runId;
+  body['judge_model'] = payload.judgeModel;
+  body['kinds'] = payload.kinds;
   if (payload.referenceRunId) {
     body['reference_run_id'] = payload.referenceRunId;
   }
   if (payload.experiment) {
     body['experiment'] = payload.experiment;
+  }
+  if (payload.allowSelfJudge) {
+    body['allow_self_judge'] = true;
   }
   const response = await request<{ job: RawJob; judge_model: string }>(
     '/judge',
@@ -554,6 +575,70 @@ export const listModels = async (): Promise<string[]> => {
 export const listTasks = async (): Promise<string[]> => {
   const data = await request<{ tasks: string[] }>('/tasks');
   return data.tasks;
+};
+
+/**
+ * Один сэмпл прогона (GET /runs/{run_id}/samples, Ф5.8c J2/J6/J7).
+ *
+ * `judge*` — вердикт нашего судьи и его токены из аудита `judge_calls.jsonl`.
+ * `null` означает «не оценивалось», а не ноль: UI показывает прочерк.
+ */
+export interface ZalaRunSample {
+  sampleId: string;
+  input: string;
+  output: string;
+  target: string | null;
+  score: number | null;
+  scorerName: string | null;
+  verdict: unknown;
+  explanation: string | null;
+  judgeModel: string | null;
+  judgeScore: number | null;
+  judgeRationale: string | null;
+  judgeKind: string | null;
+  judgeInputTokens: number | null;
+  judgeOutputTokens: number | null;
+}
+
+/** Строка RunSampleOut из ответа сервиса (snake_case). */
+interface RawRunSample {
+  sample_id: string;
+  input: string;
+  output: string;
+  target?: string | null;
+  score?: number | null;
+  scorer_name?: string | null;
+  verdict?: unknown;
+  explanation?: string | null;
+  judge_model?: string | null;
+  judge_score?: number | null;
+  judge_rationale?: string | null;
+  judge_kind?: string | null;
+  judge_input_tokens?: number | null;
+  judge_output_tokens?: number | null;
+}
+
+/** Сэмплы прогона: оба вердикта (scorer + судья) и токены судьи. */
+export const getRunSamples = async (runId: string): Promise<ZalaRunSample[]> => {
+  const data = await request<{ run_id: string; samples: RawRunSample[] }>(
+    `/runs/${encodeURIComponent(runId)}/samples`,
+  );
+  return (data.samples ?? []).map((raw) => ({
+    sampleId: raw.sample_id,
+    input: raw.input,
+    output: raw.output,
+    target: raw.target ?? null,
+    score: raw.score ?? null,
+    scorerName: raw.scorer_name ?? null,
+    verdict: raw.verdict ?? null,
+    explanation: raw.explanation ?? null,
+    judgeModel: raw.judge_model ?? null,
+    judgeScore: raw.judge_score ?? null,
+    judgeRationale: raw.judge_rationale ?? null,
+    judgeKind: raw.judge_kind ?? null,
+    judgeInputTokens: raw.judge_input_tokens ?? null,
+    judgeOutputTokens: raw.judge_output_tokens ?? null,
+  }));
 };
 
 export const apiHealth = async (): Promise<ZalaHealth> => {
