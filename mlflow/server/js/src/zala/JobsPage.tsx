@@ -220,14 +220,13 @@ export const JobsPage = () => {
   // Форма постановки.
   const [taskOptions, setTaskOptions] = useState<string[]>([]);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
-  const [tasks, setTasks] = useState<string[]>([]);
   const [model, setModel] = useState<string>('');
-  const [dataset, setDataset] = useState<string>(DEFAULT_DATASET);
   // Датасеты реестра (GET /datasets): не хардкод — локальные + внешние.
   const [datasetOptions, setDatasetOptions] = useState<ZalaDatasetSummary[]>([]);
-  // Ф5.2: составной прогон — выбранные внешние датасеты (общий group_id).
-  // Пусто -> обычная постановка по одному датасету.
-  const [groupDatasets, setGroupDatasets] = useState<string[]>([]);
+  // Тикет #8: единый список выбора — датасеты реестра и служебные таски
+  // (hello, agent_*) в одном наборе. Один элемент -> одна задача; два и
+  // больше внешних датасетов -> составной прогон с общим group_id.
+  const [selection, setSelection] = useState<string[]>([]);
   const [experimentOptions, setExperimentOptions] = useState<string[]>([DEFAULT_EXPERIMENT]);
   const [experiment, setExperiment] = useState<string>(DEFAULT_EXPERIMENT);
   const [newExperiment, setNewExperiment] = useState<string>('');
@@ -237,9 +236,8 @@ export const JobsPage = () => {
   // Ф5.8e: приоритет очереди, watchdog (минуты в UI, секунды в API) и роли.
   const [priority, setPriority] = useState<string>('0');
   const [timeLimitMinutes, setTimeLimitMinutes] = useState<string>('');
-  const [roleJudge, setRoleJudge] = useState<string>('');
-  const [roleGrader, setRoleGrader] = useState<string>('');
-  const [roleUser, setRoleUser] = useState<string>('');
+  // Тикет #16: роли из реестра датасетов — только те, что нужны выбранным.
+  const [modelRoles, setModelRoles] = useState<Record<string, string>>({});
   // Ф5.8e: раскрытые строки таблицы (роли моделей не влезают в 12 колонок).
   const [expandedJobIds, setExpandedJobIds] = useState<string[]>([]);
 
@@ -251,11 +249,46 @@ export const JobsPage = () => {
   const [topP, setTopP] = useState<string>('');
   const [topK, setTopK] = useState<string>('');
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(false);
-  // Внешний датасет: system prompt вшит в inspect_evals (Ф5.1).
-  const isExternalDataset = useMemo(
-    () => datasetOptions.find((item) => item.name === dataset)?.kind === 'external',
-    [datasetOptions, dataset],
+  // Тикет #8: единый список — внешние датасеты реестра и служебные таски.
+  // Локальный dev-датасет (various_eval_dev) — не отдельный пункт: он
+  // подставляется датасетом для служебных тасков (песочница для smoke).
+  const externalDatasets = useMemo(
+    () => datasetOptions.filter((item) => item.kind === 'external'),
+    [datasetOptions],
   );
+  const localDataset = useMemo(
+    () => datasetOptions.find((item) => item.kind === 'local')?.name ?? DEFAULT_DATASET,
+    [datasetOptions],
+  );
+  const serviceTasks = useMemo(
+    () => taskOptions.filter((name) => !datasetOptions.some((item) => item.name === name)),
+    [taskOptions, datasetOptions],
+  );
+  const selectedExternalDatasets = useMemo(
+    () => selection.filter((name) => externalDatasets.some((item) => item.name === name)),
+    [selection, externalDatasets],
+  );
+  const selectedServiceTasks = useMemo(
+    () => selection.filter((name) => serviceTasks.includes(name)),
+    [selection, serviceTasks],
+  );
+  // Составной прогон — только внешние датасеты (локальный таска не задаёт).
+  const isGroupRun = selectedExternalDatasets.length >= 2;
+  // Внешний датасет: system prompt вшит в inspect_evals (Ф5.1).
+  const isExternalDataset = selectedExternalDatasets.length > 0;
+  // Тикет #16: роли — объединение ролей выбранных датасетов (роль -> описание).
+  const availableRoles = useMemo(() => {
+    const roles: Record<string, string> = {};
+    for (const name of selectedExternalDatasets) {
+      const item = externalDatasets.find((option) => option.name === name);
+      for (const [role, description] of Object.entries(item?.roles ?? {})) {
+        if (!(role in roles)) {
+          roles[role] = description;
+        }
+      }
+    }
+    return roles;
+  }, [selectedExternalDatasets, externalDatasets]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitNotice, setSubmitNotice] = useState<string | null>(null);
@@ -333,8 +366,14 @@ export const JobsPage = () => {
         setExperimentOptions(
           experimentList.length > 0 ? experimentList.map((item) => item.name) : [DEFAULT_EXPERIMENT],
         );
-        if (taskList.length > 0 && tasks.length === 0) setTasks([taskList[0]]);
         if (modelList.length > 0 && !model) setModel(modelList[0]);
+        // Тикет #8: по умолчанию выбран первый внешний датасет реестра
+        // (локальный dev — не отдельный пункт, он подставляется служебным).
+        setSelection((prev) => {
+          if (prev.length > 0) return prev;
+          const firstExternal = datasetList.find((item) => item.kind === 'external');
+          return firstExternal ? [firstExternal.name] : [];
+        });
       } catch {
         // Опции не критичны: форма покажет пустые списки.
       }
@@ -355,13 +394,17 @@ export const JobsPage = () => {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  // E-оценка: debounce 500 мс при изменении task/model.
+  // E-оценка: debounce 500 мс при изменении выбора/модели. Для внешнего
+  // датасета task = имя датасета; для служебных — сам таск на локальном.
   useEffect(() => {
     let cancelled = false;
     setEstimate(null);
     setEstimateError(null);
+    const estimateTask =
+      selectedExternalDatasets[0] ?? selectedServiceTasks[0] ?? serviceTasks[0] ?? '';
+    const estimateDataset = selectedExternalDatasets[0] ?? localDataset;
     const timer = window.setTimeout(() => {
-      estimateJob(tasks[0] ?? '', model, undefined, dataset)
+      estimateJob(estimateTask, model, undefined, estimateDataset)
         .then((result) => {
           if (!cancelled) {
             setEstimate(result);
@@ -377,21 +420,32 @@ export const JobsPage = () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [tasks, model, dataset]);
+  }, [selectedExternalDatasets, selectedServiceTasks, serviceTasks, localDataset, model]);
 
-  /** Выбор датасета: внешний диктует task (пара dataset/task валидируется API). */
-  const onDatasetChange = useCallback(
-    (name: string) => {
-      setDataset(name);
-      setSubmitError(null);
-      const selected = datasetOptions.find((item) => item.name === name);
-      if (selected?.kind === 'external') {
-        // Внешний датасет исполняется своим таском — подставляем автоматически.
-        setTasks([name]);
+  /**
+   * Тикет #8: единый выбор. Внешние датасеты можно отмечать несколько —
+   * 2+ дадут составной прогон; служебные таски в него не входят и ставятся
+   * отдельными задачами. Внутри одной группы отметки складываются.
+   */
+  const onSelectionToggle = useCallback((name: string, checked: boolean) => {
+    setSubmitError(null);
+    setSubmitNotice(null);
+    setSelection((prev) =>
+      checked ? (prev.includes(name) ? prev : [...prev, name]) : prev.filter((item) => item !== name),
+    );
+  }, []);
+
+  // Тикет #16: смена датасета убирает роли, которых у него нет (иначе в
+  // запрос ушла бы роль, которую датасет не использует).
+  useEffect(() => {
+    setModelRoles((prev) => {
+      const next: Record<string, string> = {};
+      for (const role of Object.keys(availableRoles)) {
+        if (prev[role]) next[role] = prev[role];
       }
-    },
-    [datasetOptions],
-  );
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+    });
+  }, [availableRoles]);
 
   const onTokenChange = useCallback((value: string) => {
     setToken(value);
@@ -440,13 +494,15 @@ export const JobsPage = () => {
       }
       timeLimitS = minutesValue * 60;
     }
-    const modelRoles: Record<string, string> = {};
-    if (roleJudge) modelRoles['judge'] = roleJudge;
-    if (roleGrader) modelRoles['grader'] = roleGrader;
-    if (roleUser) modelRoles['user'] = roleUser;
-    // Ф5.2: составной прогон требует хотя бы два внешних датасета.
-    if (groupDatasets.length === 1) {
-      setSubmitError('составной прогон: выберите минимум два датасета или снимите отметки');
+    // Тикет #16: шлём только роли, которые нужны выбранным датасетам.
+    const roles: Record<string, string> = {};
+    for (const role of Object.keys(availableRoles)) {
+      const value = modelRoles[role];
+      if (value) roles[role] = value;
+    }
+    // Тикет #8: без выбора ставить нечего.
+    if (selection.length === 0) {
+      setSubmitError('выберите датасет или служебный таск');
       return;
     }
     // Ф5.1: ручки генерации — проверяем диапазоны до отправки (сервис тоже
@@ -515,15 +571,15 @@ export const JobsPage = () => {
       }
 
       const created: string[] = [];
-      if (groupDatasets.length > 0) {
-        // Ф5.2: составной прогон — N задач с общим group_id. `task`
-        // определяется сервисом по имени датасета; system_prompt у внешних
-        // датасетов вшит в inspect_evals и не передаётся.
+      // Внешние датасеты: 1 -> одна задача, 2+ -> составной прогон с общим
+      // group_id (task определяется сервисом по имени датасета; system_prompt
+      // у внешних вшит в inspect_evals и не передаётся).
+      if (isGroupRun) {
         const groupKnobs = { ...knobs };
         delete groupKnobs['system_prompt'];
         const group = await createGroupJobs(
           {
-            datasets: groupDatasets,
+            datasets: selectedExternalDatasets,
             model,
             seed: seedValue,
             epochs: epochsValue,
@@ -532,7 +588,7 @@ export const JobsPage = () => {
             knobs: groupKnobs,
             priority: priorityValue,
             timeLimitS,
-            modelRoles,
+            modelRoles: roles,
           },
           token,
         );
@@ -540,31 +596,58 @@ export const JobsPage = () => {
         setSubmitNotice(
           `Составной прогон ${group.groupId.slice(0, 8)}: задач ${created.length} (${created.join(', ')}).`,
         );
-      } else {
-        for (const taskName of tasks) {
-          const job = await createJob(
-            {
-              task: taskName,
-              model,
-              dataset: dataset.trim() || DEFAULT_DATASET,
-              seed: seedValue,
-              epochs: epochsValue,
-              scheduledAt: scheduledAt || undefined,
-              experiment: experimentName,
-              knobs,
-              priority: priorityValue,
-              timeLimitS,
-              modelRoles,
-            },
-            token,
-          );
-          created.push(job.jobId.slice(0, 8));
-        }
-        setSubmitNotice(
-          created.length === 1
-            ? `Job ${created[0]} поставлен в очередь.`
-            : `Поставлено задач: ${created.length} (${created.join(', ')}).`,
+      } else if (selectedExternalDatasets.length === 1) {
+        const name = selectedExternalDatasets[0];
+        // system_prompt у внешних датасетов вшит в inspect_evals — не шлём.
+        const externalKnobs = { ...knobs };
+        delete externalKnobs['system_prompt'];
+        const job = await createJob(
+          {
+            task: name,
+            dataset: name,
+            model,
+            seed: seedValue,
+            epochs: epochsValue,
+            scheduledAt: scheduledAt || undefined,
+            experiment: experimentName,
+            knobs: externalKnobs,
+            priority: priorityValue,
+            timeLimitS,
+            modelRoles: roles,
+          },
+          token,
         );
+        created.push(job.jobId.slice(0, 8));
+        setSubmitNotice(`Job ${created[0]} поставлен в очередь.`);
+      }
+      // Служебные таски — всегда отдельные задачи на локальном датасете,
+      // в составной прогон не входят.
+      for (const taskName of selectedServiceTasks) {
+        const job = await createJob(
+          {
+            task: taskName,
+            dataset: localDataset,
+            model,
+            seed: seedValue,
+            epochs: epochsValue,
+            scheduledAt: scheduledAt || undefined,
+            experiment: experimentName,
+            knobs,
+            priority: priorityValue,
+            timeLimitS,
+            // Роли — только у внешних датасетов (у служебных тасков их нет).
+            modelRoles: {},
+          },
+          token,
+        );
+        created.push(job.jobId.slice(0, 8));
+        if (!isGroupRun && selectedExternalDatasets.length === 0) {
+          setSubmitNotice(
+            selectedServiceTasks.length === 1
+              ? `Job ${created[created.length - 1]} поставлен в очередь.`
+              : `Поставлено задач: ${created.length} (${created.join(', ')}).`,
+          );
+        }
       }
       await refresh(false);
     } catch (e: unknown) {
@@ -580,10 +663,14 @@ export const JobsPage = () => {
     token,
     seed,
     epochs,
-    tasks,
+    selection,
     model,
-    dataset,
-    groupDatasets,
+    selectedExternalDatasets,
+    selectedServiceTasks,
+    isGroupRun,
+    localDataset,
+    availableRoles,
+    modelRoles,
     scheduledAt,
     experiment,
     newExperiment,
@@ -595,9 +682,6 @@ export const JobsPage = () => {
     topK,
     priority,
     timeLimitMinutes,
-    roleJudge,
-    roleGrader,
-    roleUser,
     refresh,
   ]);
 
@@ -1014,22 +1098,52 @@ export const JobsPage = () => {
           </Typography.Title>
 
           <div>
-            <Typography.Text color="secondary">Задачи</Typography.Text>
+            <Typography.Text color="secondary">Датасеты</Typography.Text>
+            <Typography.Paragraph color="secondary" css={{ fontSize: 12, marginBottom: theme.spacing.xs }}>
+              Один датасет — одна задача; два и более — составной прогон с общим group_id.
+            </Typography.Paragraph>
             <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
-              {taskOptions.map((option) => (
-                <Checkbox
-                  key={option}
-                  componentId={`zala.jobs.form.task.${option}`}
-                  isChecked={tasks.includes(option)}
-                  onChange={(checked) =>
-                    setTasks((prev) =>
-                      checked ? [...prev, option] : prev.filter((t) => t !== option),
-                    )
-                  }
-                >
-                  {option}
-                </Checkbox>
-              ))}
+              {externalDatasets.length === 0 ? (
+                <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                  Внешних датасетов в реестре нет.
+                </Typography.Text>
+              ) : (
+                externalDatasets.map((item) => (
+                  <Checkbox
+                    key={item.name}
+                    componentId="zala.jobs.form.dataset"
+                    isChecked={selection.includes(item.name)}
+                    onChange={(checked) => onSelectionToggle(item.name, checked)}
+                  >
+                    {item.name} · {item.samples} сэмплов
+                  </Checkbox>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div>
+            <Typography.Text color="secondary">Служебные</Typography.Text>
+            <Typography.Paragraph color="secondary" css={{ fontSize: 12, marginBottom: theme.spacing.xs }}>
+              Свои таски на локальном датасете ({localDataset}); в составной прогон не входят.
+            </Typography.Paragraph>
+            <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+              {serviceTasks.length === 0 ? (
+                <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                  Служебных тасков нет.
+                </Typography.Text>
+              ) : (
+                serviceTasks.map((option) => (
+                  <Checkbox
+                    key={option}
+                    componentId="zala.jobs.form.task"
+                    isChecked={selection.includes(option)}
+                    onChange={(checked) => onSelectionToggle(option, checked)}
+                  >
+                    {option}
+                  </Checkbox>
+                ))
+              )}
             </div>
           </div>
 
@@ -1088,78 +1202,22 @@ export const JobsPage = () => {
             )}
           </div>
 
-          <div>
-            <Typography.Text color="secondary">Датасет</Typography.Text>
-            <SimpleSelect
-              id="zala-jobs-dataset"
-              componentId="zala.jobs.form.dataset"
-              value={dataset}
-              onChange={({ target }) => onDatasetChange(target.value)}
-            >
-              {datasetOptions.length === 0 ? (
-                <SimpleSelectOption value={DEFAULT_DATASET}>{DEFAULT_DATASET}</SimpleSelectOption>
-              ) : (
-                <>
-                  {/* Дефолт по умолчанию — display-алиас локального датасета. */}
-                  {!datasetOptions.some((item) => item.name === DEFAULT_DATASET) && (
-                    <SimpleSelectOption value={DEFAULT_DATASET}>
-                      {DEFAULT_DATASET} · dev
-                    </SimpleSelectOption>
-                  )}
-                  {datasetOptions.map((item) => (
-                    <SimpleSelectOption key={item.name} value={item.name}>
-                      {item.kind === 'external' ? `${item.name} · HF` : `${item.name} · dev`}
-                    </SimpleSelectOption>
-                  ))}
-                </>
-              )}
-            </SimpleSelect>
-            {datasetOptions.find((item) => item.name === dataset)?.kind === 'external' && (
-              <Typography.Text color="secondary" css={{ fontSize: 12 }}>
-                Внешний датасет: task = {dataset}, сэмплов в выборке:{' '}
-                {datasetOptions.find((item) => item.name === dataset)?.samples}
-              </Typography.Text>
-            )}
-          </div>
-
-          {/* Ф5.2: составной прогон — мультивыбор внешних датасетов. */}
-          <div>
-            <Typography.Text color="secondary">Составной прогон (датасеты)</Typography.Text>
-            <Typography.Paragraph color="secondary" css={{ fontSize: 12, marginBottom: theme.spacing.xs }}>
-              Отметьте два и более внешних датасета — сервис поставит по задаче на
-              каждый с общим group_id, а на вкладке «Результаты» появится общий скор.
-            </Typography.Paragraph>
-            <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
-              {datasetOptions.filter((item) => item.kind === 'external').length === 0 ? (
-                <Typography.Text color="secondary" css={{ fontSize: 12 }}>
-                  Внешних датасетов в реестре нет.
-                </Typography.Text>
-              ) : (
-                datasetOptions
-                  .filter((item) => item.kind === 'external')
-                  .map((item) => (
-                    <Checkbox
-                      key={item.name}
-                      componentId={`zala.jobs.form.group.${item.name}`}
-                      isChecked={groupDatasets.includes(item.name)}
-                      onChange={(checked) =>
-                        setGroupDatasets((prev) =>
-                          checked ? [...prev, item.name] : prev.filter((name) => name !== item.name),
-                        )
-                      }
-                    >
-                      {item.name} · {item.samples} сэмплов
-                    </Checkbox>
-                  ))
-              )}
-            </div>
-            {groupDatasets.length > 0 && (
-              <Typography.Text color="secondary" css={{ fontSize: 12 }}>
-                Будет создано задач: {groupDatasets.length} ({groupDatasets.join(', ')});
-                поле «Датасет» и список задач выше игнорируются.
-              </Typography.Text>
-            )}
-          </div>
+          {selection.length > 0 && (
+            <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+              {[
+                isGroupRun
+                  ? `Составной прогон: ${selectedExternalDatasets.length} задач с общим group_id (${selectedExternalDatasets.join(', ')}).`
+                  : selectedExternalDatasets.length === 1
+                    ? `Датасет: ${selectedExternalDatasets[0]}.`
+                    : null,
+                selectedServiceTasks.length > 0
+                  ? `Служебные: ${selectedServiceTasks.length} отдельных задач (${selectedServiceTasks.join(', ')}).`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(' ')}
+            </Typography.Text>
+          )}
 
           <div css={{ display: 'flex', gap: theme.spacing.sm }}>
             <div css={{ flex: 1 }}>
@@ -1333,69 +1391,44 @@ export const JobsPage = () => {
             </div>
           </div>
 
-          {/* Ф5.8e: роли моделей для Inspect (пусто — модель прогона). */}
-          <div>
-            <Typography.Text color="secondary">Роли моделей</Typography.Text>
-            <Typography.Paragraph color="secondary" css={{ fontSize: 12, marginBottom: theme.spacing.xs }}>
-              Без роли Inspect подставит саму модель прогона — GLM будет судить GLM.
-            </Typography.Paragraph>
-            <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
-              <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
-                <Typography.Text css={{ width: 60 }}>judge</Typography.Text>
-                <div css={{ flex: 1 }}>
-                  <SimpleSelect
-                    id="zala-jobs-role-judge"
-                    componentId="zala.jobs.form.model_role.judge"
-                    value={roleJudge}
-                    onChange={({ target }) => setRoleJudge(target.value)}
-                  >
-                    <SimpleSelectOption value="">— не задана —</SimpleSelectOption>
-                    {modelOptions.map((option) => (
-                      <SimpleSelectOption key={option} value={option}>
-                        {option}
-                      </SimpleSelectOption>
-                    ))}
-                  </SimpleSelect>
-                </div>
-              </div>
-              <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
-                <Typography.Text css={{ width: 60 }}>grader</Typography.Text>
-                <div css={{ flex: 1 }}>
-                  <SimpleSelect
-                    id="zala-jobs-role-grader"
-                    componentId="zala.jobs.form.model_role.grader"
-                    value={roleGrader}
-                    onChange={({ target }) => setRoleGrader(target.value)}
-                  >
-                    <SimpleSelectOption value="">— не задана —</SimpleSelectOption>
-                    {modelOptions.map((option) => (
-                      <SimpleSelectOption key={option} value={option}>
-                        {option}
-                      </SimpleSelectOption>
-                    ))}
-                  </SimpleSelect>
-                </div>
-              </div>
-              <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
-                <Typography.Text css={{ width: 60 }}>user</Typography.Text>
-                <div css={{ flex: 1 }}>
-                  <SimpleSelect
-                    id="zala-jobs-role-user"
-                    componentId="zala.jobs.form.model_role.user"
-                    value={roleUser}
-                    onChange={({ target }) => setRoleUser(target.value)}
-                  >
-                    <SimpleSelectOption value="">— не задана —</SimpleSelectOption>
-                    {modelOptions.map((option) => (
-                      <SimpleSelectOption key={option} value={option}>
-                        {option}
-                      </SimpleSelectOption>
-                    ))}
-                  </SimpleSelect>
-                </div>
+          {/* Тикет #16: роли — только те, что нужны выбранным датасетам. */}
+          {Object.keys(availableRoles).length > 0 && (
+            <div>
+              <Typography.Text color="secondary">Роли моделей</Typography.Text>
+              <Typography.Paragraph color="secondary" css={{ fontSize: 12, marginBottom: theme.spacing.xs }}>
+                Пусто = Inspect подставит модель прогона (GLM будет судить GLM).
+              </Typography.Paragraph>
+              <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+                {Object.entries(availableRoles).map(([role, description]) => (
+                  <div key={role} css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+                    <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+                      <Typography.Text css={{ width: 60 }}>{role}</Typography.Text>
+                      <div css={{ flex: 1 }}>
+                        <SimpleSelect
+                          id={`zala-jobs-role-${role}`}
+                          componentId="zala.jobs.form.model_role"
+                          value={modelRoles[role] ?? ''}
+                          onChange={({ target }) =>
+                            setModelRoles((prev) => ({ ...prev, [role]: target.value }))
+                          }
+                        >
+                          <SimpleSelectOption value="">— не задана —</SimpleSelectOption>
+                          {modelOptions.map((option) => (
+                            <SimpleSelectOption key={option} value={option}>
+                              {option}
+                            </SimpleSelectOption>
+                          ))}
+                        </SimpleSelect>
+                      </div>
+                    </div>
+                    <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                      {description}
+                    </Typography.Text>
+                  </div>
+                ))}
               </div>
             </div>
-          </div>
+          )}
 
           <div>
             <Typography.Text color="secondary">Время запуска (опционально)</Typography.Text>

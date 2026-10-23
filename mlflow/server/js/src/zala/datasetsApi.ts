@@ -22,6 +22,11 @@ export interface ZalaDatasetSummary {
   kind: 'local' | 'external';
   /** Ревизия HF внешнего датасета (для локальных — null). */
   revision: string | null;
+  /**
+   * Тикет #16: роли моделей Inspect (judge/grader) -> описание для подсказки.
+   * Пусто — датасет не использует отдельных ролей.
+   */
+  roles: Record<string, string>;
 }
 
 /** Сэмпл датасета (SampleOut из zalabench-api). */
@@ -50,6 +55,7 @@ interface RawDatasetSummary {
   warnings?: string[];
   kind?: 'local' | 'external';
   revision?: string | null;
+  roles?: Record<string, string>;
 }
 
 /** Строка SampleOut в ответе сервиса (snake_case). */
@@ -77,6 +83,7 @@ const toDatasetSummary = (raw: RawDatasetSummary): ZalaDatasetSummary => ({
   warnings: raw.warnings ?? [],
   kind: raw.kind ?? 'local',
   revision: raw.revision ?? null,
+  roles: raw.roles ?? {},
 });
 
 /** snake_case -> camelCase (sample). */
