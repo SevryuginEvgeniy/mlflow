@@ -5,7 +5,7 @@
  * cancel/retry. Данные — из нашего сервиса `zalabench-api` (FastAPI),
  * не из MLflow REST (см. docs/UI-FORK.md).
  */
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -176,19 +176,15 @@ const pluralTasks = (count: number): string => {
   return 'задач';
 };
 
-const formatElapsed = (startedAt: string | null): string => {
-  if (!startedAt) {
-    return '—';
-  }
-  const ms = Date.now() - new Date(startedAt).getTime();
-  if (!Number.isFinite(ms) || ms < 0) {
-    return '—';
-  }
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes > 0 ? `${minutes} мин ${seconds} с` : `${seconds} с`;
-};
+/**
+ * Подпись датасета под именем задачи в очереди (B-50).
+ *
+ * У судейского job'а (`task="judge"`) датасета нет — бэкенд оставляет в
+ * `JobCreate.dataset` дефолт `"Various eval"`, и в планировщике это
+ * читается как настоящий датасет. Показываем `judge_job` вместо него.
+ */
+const jobDatasetLabel = (job: ZalaJob): string =>
+  job.taskName === 'judge' ? 'judge_job' : job.dataset || '—';
 
 /** Читает токен из sessionStorage (может быть недоступен). */
 const readToken = (): string => {
@@ -252,7 +248,6 @@ export const JobsPage = () => {
   // Тикет #16: роли из реестра датасетов — только те, что нужны выбранным.
   const [modelRoles, setModelRoles] = useState<Record<string, string>>({});
   // Ф5.8e: раскрытые строки таблицы (роли моделей не влезают в 12 колонок).
-  const [expandedJobIds, setExpandedJobIds] = useState<string[]>([]);
 
   // Ф5.1: ручки генерации. Основные — всегда на виду, расширенные — свёрнуты.
   const [temperature, setTemperature] = useState<string>('0');
@@ -915,7 +910,7 @@ export const JobsPage = () => {
               }}
             >
               <TableRow isHeader>
-                <TableHeader componentId="zala.jobs.id_header" css={{ flex: 1 }}>
+                <TableHeader componentId="zala.jobs.id_header" css={{ flex: 1.6 }}>
                   Job
                 </TableHeader>
                 <TableHeader componentId="zala.jobs.task_header" css={{ flex: 1.5 }}>
@@ -963,30 +958,21 @@ export const JobsPage = () => {
               </TableRow>
               {jobs.map((job) => {
                 const isPending = pendingJobId === job.jobId;
-                const isExpanded = expandedJobIds.includes(job.jobId);
                 const roleEntries = Object.entries(job.modelRoles || {});
+                // Тикет #23 (B-52): роли моделей — в подсказке к ячейке
+                // «Модель», по строке на роль. Нет ролей — нет подсказки.
+                const rolesTitle =
+                  roleEntries.length > 0
+                    ? roleEntries.map(([role, roleModel]) => `${role}: ${roleModel}`).join('\n')
+                    : undefined;
+                const datasetLabel = jobDatasetLabel(job);
                 return (
-                  <Fragment key={job.jobId}>
-                  <TableRow>
-                    <TableCell css={{ flex: 1 }}>
+                  <TableRow key={job.jobId}>
+                    <TableCell css={{ flex: 1.6 }}>
                       <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
-                        <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.xs }}>
-                          {/* Ф5.8e: раскрытие строки — роли моделей. */}
-                          <Button
-                            componentId="zala.jobs.expand"
-                            type="tertiary"
-                            onClick={() =>
-                              setExpandedJobIds((prev) =>
-                                prev.includes(job.jobId)
-                                  ? prev.filter((id) => id !== job.jobId)
-                                  : [...prev, job.jobId],
-                              )
-                            }
-                          >
-                            {isExpanded ? '▾' : '▸'}
-                          </Button>
-                          <code>{job.jobId.slice(0, 8)}</code>
-                        </div>
+                        {/* Тикет #23 (B-52): без стрелки раскрытия; полное имя
+                            job — в подсказке, первые 8 символов видны всегда. */}
+                        <code title={job.jobId}>{job.jobId.slice(0, 8)}</code>
                         {/* Ф5.2: бейдж «группа» у задач составного прогона. */}
                         {job.groupId && (
                           <Tag componentId="zala.jobs.group_badge" color="indigo" title={job.groupId}>
@@ -995,8 +981,19 @@ export const JobsPage = () => {
                         )}
                       </div>
                     </TableCell>
-                    <TableCell css={{ flex: 1.5 }}>{job.taskName}</TableCell>
-                    <TableCell css={{ flex: 1.5 }}>{job.model}</TableCell>
+                    <TableCell css={{ flex: 1.5 }}>
+                      <div css={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <span>{job.taskName}</span>
+                        {/* B-50: у судейского job'а нет датасета — показываем
+                            «judge_job», а не дефолт «Various eval». */}
+                        <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                          {datasetLabel}
+                        </Typography.Text>
+                      </div>
+                    </TableCell>
+                    <TableCell css={{ flex: 1.5 }} title={rolesTitle}>
+                      {job.model}
+                    </TableCell>
                     <TableCell css={{ flex: 1.2 }}>{job.experiment}</TableCell>
                     <TableCell css={{ flex: 1 }}>
                       <StatusBadge status={job.status} />
@@ -1017,8 +1014,9 @@ export const JobsPage = () => {
                       {job.timeLimitS != null ? `${Math.round(job.timeLimitS / 60)} мин` : '—'}
                     </TableCell>
                     <TableCell css={{ flex: 1.6 }}>
+                      {/* B-39: время здесь дублировало колонку «Длительность». */}
                       {job.status === 'running'
-                        ? `${job.progressDone}/${job.progressTotal ?? '?'} · ${formatElapsed(job.startedAt)}`
+                        ? `${job.progressDone}/${job.progressTotal ?? '?'}`
                         : job.status === 'partial'
                           ? job.progressTotal != null
                             ? `${job.progressDone} из ${job.progressTotal} сэмплов, прервано`
@@ -1072,27 +1070,6 @@ export const JobsPage = () => {
                       </div>
                     </TableCell>
                   </TableRow>
-                  {/* Ф5.8e: раскрытие строки — роли моделей (не влезают в колонки). */}
-                  {isExpanded && (
-                    <TableRow>
-                      <TableCell css={{ flex: 1 }} multiline>
-                        {roleEntries.length === 0 ? (
-                          <Typography.Text color="secondary">
-                            Роли не заданы — Inspect подставит модель прогона.
-                          </Typography.Text>
-                        ) : (
-                          <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
-                            {roleEntries.map(([role, roleModel]) => (
-                              <Typography.Text key={role} css={{ fontSize: 12 }}>
-                                {role} → {roleModel}
-                              </Typography.Text>
-                            ))}
-                          </div>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  )}
-                  </Fragment>
                 );
               })}
             </Table>

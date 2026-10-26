@@ -151,6 +151,20 @@ const collectMetrics = (run: ZalaRunSummary, prefix: string): MetricRow[] => {
 /** Компактный вывод числа (без хвостовых нулей). */
 const formatNumber = (value: number): string => String(Number(value.toFixed(4)));
 
+/**
+ * Дата в списке прогонов: `26.10 14:32` (тикет #23). Полная дата с
+ * секундами (`toLocaleString`) не влезала в колонку и не нужна: прогоны
+ * одной сессии различаются минутами. Год опускаем — он есть в деталях.
+ */
+const formatShortDateTime = (ms: number): string => {
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) {
+    return '—';
+  }
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
 /** `value [ci_lower, ci_upper]` либо прочерк. */
 const formatMetric = (row: MetricRow): string => {
   const value = row.value !== undefined ? formatNumber(row.value) : '—';
@@ -233,11 +247,8 @@ const MetricsTable = ({
           <TableHeader componentId={`${componentId}.metric_header`} css={{ flex: 2 }}>
             Метрика
           </TableHeader>
-          <TableHeader componentId={`${componentId}.value_header`} css={{ flex: 2 }}>
+          <TableHeader componentId={`${componentId}.value_header`} css={{ flex: 3 }}>
             Значение [CI]
-          </TableHeader>
-          <TableHeader componentId={`${componentId}.status_header`} css={{ flex: 2 }}>
-            Статус
           </TableHeader>
         </TableRow>
         {visibleRows.map((row) => {
@@ -247,15 +258,21 @@ const MetricsTable = ({
               <TableCell css={{ flex: 2 }}>
                 <code>{row.key.slice(prefix.length)}</code>
               </TableCell>
-              <TableCell css={{ flex: 2 }}>{formatMetric(row)}</TableCell>
-              <TableCell css={{ flex: 2 }}>
-                <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <StatusBadge status={row.status} />
-                  {explanation && (
-                    <Typography.Text color="secondary" size="sm">
-                      {explanation}
-                    </Typography.Text>
-                  )}
+              <TableCell css={{ flex: 3 }}>
+                {/* Тикет #23: статус живёт под числом — колонка «Статус» была
+                    пустой у всех ok-метрик. */}
+                <div css={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span>{formatMetric(row)}</span>
+                  {(row.status && row.status !== 'ok') || explanation ? (
+                    <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <StatusBadge status={row.status} />
+                      {explanation && (
+                        <Typography.Text color="secondary" size="sm">
+                          {explanation}
+                        </Typography.Text>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
               </TableCell>
             </TableRow>
@@ -365,21 +382,14 @@ const formatScorerVerdict = (sample: ZalaRunSample): string => {
   return raw === null || raw === undefined ? '—' : String(raw);
 };
 
-/** Строка «токены судьи»: «1 000 / 40» или прочерк, если судейства не было. */
-const formatJudgeTokens = (sample: ZalaRunSample): string => {
-  if (sample.judgeInputTokens === null && sample.judgeOutputTokens === null) {
-    return '—';
-  }
-  return `${sample.judgeInputTokens ?? 0} / ${sample.judgeOutputTokens ?? 0}`;
-};
-
 /**
- * Вердикты по сэмплам: оба вердикта рядом (тикет #12) и токены судьи (#18).
+ * Вердикты по сэмплам: оба вердикта рядом (тикет #12).
  *
  * Источник — `GET /runs/{id}/samples`: вердикт штатного scorer'а
  * (`score`/`verdict`) и вердикт нашего судьи (`judgeScore` 0..10 +
- * `judgeRationale`) из аудита `judge_calls.jsonl`, плюс токены судьи —
- * в `inspect.tokens` они не попадают. `null` = «не оценивалось», не ноль.
+ * `judgeRationale`) из аудита `judge_calls.jsonl`. `null` = «не
+ * оценивалось», не ноль. Токены судьи из таблицы убраны (тикет #23):
+ * стоимость судейства видна агрегатом `zala.judge.*` в «Судейских метриках».
  */
 const VerdictsBlock = ({ run }: { run: ZalaRunSummary }) => {
   const { theme } = useDesignSystemTheme();
@@ -485,9 +495,6 @@ const VerdictsBlock = ({ run }: { run: ZalaRunSummary }) => {
             <TableHeader componentId="zala.verdicts.judge_header" css={{ flex: 2 }}>
               Судья (0–10)
             </TableHeader>
-            <TableHeader componentId="zala.verdicts.tokens_header" css={{ flex: 2 }}>
-              Токены судьи (вход / выход)
-            </TableHeader>
             <TableHeader componentId="zala.verdicts.rationale_header" css={{ flex: 2 }}>
               Обоснование
             </TableHeader>
@@ -514,7 +521,6 @@ const VerdictsBlock = ({ run }: { run: ZalaRunSummary }) => {
                       <Typography.Text color="secondary">не оценивалось</Typography.Text>
                     )}
                   </TableCell>
-                  <TableCell css={{ flex: 2 }}>{formatJudgeTokens(sample)}</TableCell>
                   <TableCell css={{ flex: 2 }}>
                     <Typography.Text color="secondary">{isOpen ? 'Свернуть' : 'Показать'}</Typography.Text>
                   </TableCell>
@@ -591,7 +597,11 @@ const ComparisonBlock = ({ left, right }: { left: ZalaRunSummary; right: ZalaRun
         map.set(row.key, entry);
       });
     });
-    return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
+    // Тикет #23: строка без значения у ОБОИХ прогонов ничего не сравнивает.
+    // Если значение есть хотя бы у одного — строка остаётся, у второго «—».
+    return Array.from(map.entries())
+      .filter(([, pair]) => pair.left?.value !== undefined || pair.right?.value !== undefined)
+      .sort(([a], [b]) => a.localeCompare(b));
   }, [left, right]);
 
   const diffText = diff.diffs.map((name) => STAMP_LABELS[name] ?? name).join(', ');
@@ -1649,7 +1659,7 @@ export const ZalaPage = () => {
                       <TableCell css={{ flex: 2 }}>{run.dataset}</TableCell>
                       <TableCell css={{ flex: 1 }}>{run.status}</TableCell>
                       <TableCell css={{ flex: 2 }}>
-                        {run.startTime ? new Date(run.startTime).toLocaleString() : '—'}
+                        {run.startTime ? formatShortDateTime(run.startTime) : '—'}
                       </TableCell>
                     </TableRow>
                   );
@@ -1676,6 +1686,15 @@ export const ZalaPage = () => {
           <div css={{ flex: '1 1 520px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: theme.spacing.lg }}>
             {selectedRun ? (
               <>
+                {/* Тикет #23: сравнение — первым блоком правой колонки, выше
+                    деталей прогона. Состав метрик не меняется. */}
+                {compareRun && (
+                  <div>
+                    <Typography.Title level={5}>Сравнение: {compareRun.runName}</Typography.Title>
+                    <ComparisonBlock left={selectedRun} right={compareRun} />
+                  </div>
+                )}
+
                 <div>
                   <Typography.Title level={4} css={{ marginBottom: theme.spacing.xs }}>
                     {selectedRun.runName}
@@ -1752,13 +1771,6 @@ export const ZalaPage = () => {
                   visible={judgeModalOpen}
                   onClose={() => setJudgeModalOpen(false)}
                 />
-
-                {compareRun && (
-                  <div>
-                    <Typography.Title level={5}>Сравнение: {compareRun.runName}</Typography.Title>
-                    <ComparisonBlock left={selectedRun} right={compareRun} />
-                  </div>
-                )}
               </>
             ) : (
               <Typography.Paragraph color="secondary">Выберите прогон в таблице слева.</Typography.Paragraph>
