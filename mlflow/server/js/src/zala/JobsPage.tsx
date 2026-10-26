@@ -281,8 +281,18 @@ export const JobsPage = () => {
       DEFAULT_DATASET,
     [datasetOptions],
   );
+  // Служебные таски — те, что не принадлежат ни одному датасету.
+  // Сравнивать только с `item.name` мало: у локального датасета есть СВОИ
+  // таски (`math_tooluse` -> math_calc/math_python/math_notools), и они
+  // попадали в оба блока сразу (V13). Исключаем и имена, и их таски.
   const serviceTasks = useMemo(
-    () => taskOptions.filter((name) => !datasetOptions.some((item) => item.name === name)),
+    () =>
+      taskOptions.filter(
+        (name) =>
+          !datasetOptions.some(
+            (item) => item.name === name || item.tasks.includes(name),
+          ),
+      ),
     [taskOptions, datasetOptions],
   );
   const selectedExternalDatasets = useMemo(
