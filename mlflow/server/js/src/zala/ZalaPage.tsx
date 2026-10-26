@@ -15,6 +15,7 @@ import {
   Empty,
   Input,
   Modal,
+  PencilIcon,
   SimpleSelect,
   SimpleSelectOption,
   Spinner,
@@ -30,7 +31,15 @@ import {
 import { useSearchParams } from '../common/utils/RoutingUtils';
 import type { ZalaGroup } from './jobsApi';
 import type { ZalaRunSample } from './jobsApi';
-import { ZalaApiError, createJudgeJob, getGroup, getRunSamples, listExperiments, listModels } from './jobsApi';
+import {
+  ZalaApiError,
+  createJudgeJob,
+  getGroup,
+  getRunSamples,
+  listExperiments,
+  listModels,
+  renameRun,
+} from './jobsApi';
 import type { ZalaChannel, ZalaRunSummary } from './api';
 import {
   ZALA_RUNS_LIMIT,
@@ -1319,9 +1328,18 @@ export const ZalaPage = () => {
   const perfMetrics = selectedRun ? collectMetrics(selectedRun, 'zala.perf.') : [];
   const inspectMetrics = selectedRun ? collectMetrics(selectedRun, 'inspect.') : [];
 
+  // Тикет #28: переименование прогона в панели деталей.
+  const [renameEditing, setRenameEditing] = useState<boolean>(false);
+  const [renameValue, setRenameValue] = useState<string>('');
+  const [renameSaving, setRenameSaving] = useState<boolean>(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+
   const selectRun = useCallback((runId: string) => {
     setSelectedRunId(runId);
     setCompareRunId((prev) => (prev === runId ? null : prev));
+    // Тикет #28: смена прогона закрывает незавершённое переименование.
+    setRenameEditing(false);
+    setRenameError(null);
   }, []);
 
   const toggleCompare = useCallback((runId: string) => {
@@ -1333,6 +1351,51 @@ export const ZalaPage = () => {
     setCompareMode((prev) => !prev);
     setCompareRunId(null);
   }, []);
+
+  const startRename = useCallback((currentName: string) => {
+    setRenameValue(currentName);
+    setRenameError(null);
+    setRenameEditing(true);
+  }, []);
+
+  const cancelRename = useCallback(() => {
+    setRenameEditing(false);
+    setRenameError(null);
+  }, []);
+
+  const commitRename = useCallback(async () => {
+    if (!selectedRunId || renameSaving) {
+      return;
+    }
+    const nextName = renameValue.trim();
+    if (!nextName) {
+      setRenameError('имя не может быть пустым');
+      return;
+    }
+    const token = readApiToken();
+    if (!token) {
+      setRenameError('введите токен на вкладке «Очередь» — без него переименование недоступно');
+      return;
+    }
+    setRenameSaving(true);
+    setRenameError(null);
+    try {
+      const result = await renameRun(selectedRunId, nextName, token);
+      // Обновляем локальный список — заголовок меняется без перезагрузки.
+      setRuns((prev) => prev.map((run) => (run.runId === selectedRunId ? { ...run, runName: result.runName } : run)));
+      setRenameEditing(false);
+    } catch (e) {
+      if (e instanceof ZalaApiError && e.status === 404) {
+        setRenameError('прогон не найден (или сервис ещё не поддерживает переименование)');
+      } else if (e instanceof ZalaApiError && e.status === 400) {
+        setRenameError(e.message || 'невалидное имя (1–64 символа: буквы, цифры, - _ пробел)');
+      } else {
+        setRenameError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setRenameSaving(false);
+    }
+  }, [selectedRunId, renameValue, renameSaving]);
 
   // Ф5.8 M2: клик по строке — в режиме сравнения выбирает второй прогон,
   // иначе открывает детали (старое поведение).
@@ -1696,9 +1759,53 @@ export const ZalaPage = () => {
                 )}
 
                 <div>
-                  <Typography.Title level={4} css={{ marginBottom: theme.spacing.xs }}>
-                    {selectedRun.runName}
-                  </Typography.Title>
+                  {/* Тикет #28: заголовок прогона с переименованием.
+                      Enter — сохранить, Esc — отменить. */}
+                  {renameEditing ? (
+                    <Input
+                      componentId="zala.run.rename_input"
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void commitRename();
+                        } else if (e.key === 'Escape') {
+                          e.preventDefault();
+                          cancelRename();
+                        }
+                      }}
+                      disabled={renameSaving}
+                      autoFocus
+                      maxLength={64}
+                      css={{ marginBottom: theme.spacing.xs }}
+                    />
+                  ) : (
+                    <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.xs }}>
+                      <Typography.Title level={4} css={{ marginBottom: theme.spacing.xs }}>
+                        {selectedRun.runName}
+                      </Typography.Title>
+                      <Button
+                        componentId="zala.run.rename"
+                        type="link"
+                        size="small"
+                        aria-label="Переименовать прогон"
+                        loading={renameSaving}
+                        onClick={() => startRename(selectedRun.runName)}
+                      >
+                        <PencilIcon />
+                      </Button>
+                    </div>
+                  )}
+                  {renameError && (
+                    <Alert
+                      componentId="zala.run.rename_error"
+                      type="error"
+                      message="Не удалось переименовать"
+                      description={renameError}
+                      closable={false}
+                    />
+                  )}
                   <Typography.Text color="secondary">
                     {selectedRun.model} · {selectedRun.dataset} · {selectedRun.status}
                   </Typography.Text>

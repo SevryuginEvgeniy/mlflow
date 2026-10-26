@@ -117,6 +117,11 @@ export interface ZalaJobCreate {
   timeLimitS?: number;
   /** Ф5.8e: роли моделей (`judge`/`grader`/`user`) -> имя модели шлюза. */
   modelRoles?: Record<string, string>;
+  /**
+   * Тикет #27/#28: имя прогона (1–64 символа). Пусто/не задано — сервис
+   * вычисляет дефолт `<dataset>-<model>-<ДД.ММ>`.
+   */
+  name?: string;
 }
 
 /** Тело POST /judge (Ф5.1): судейство прогона из UI. */
@@ -316,6 +321,9 @@ export const createJob = async (payload: ZalaJobCreate, token: string): Promise<
   if (payload.modelRoles && Object.keys(payload.modelRoles).length > 0) {
     body['model_roles'] = payload.modelRoles;
   }
+  if (payload.name) {
+    body['name'] = payload.name;
+  }
   const raw = await request<RawJob>('/jobs', { method: 'POST', body: JSON.stringify(body) }, token);
   return toZalaJob(raw);
 };
@@ -438,6 +446,9 @@ export const createGroupJobs = async (
   }
   if (payload.modelRoles && Object.keys(payload.modelRoles).length > 0) {
     body['model_roles'] = payload.modelRoles;
+  }
+  if (payload.name) {
+    body['name'] = payload.name;
   }
   const raw = await request<{ group_id: string; jobs: RawJob[] }>(
     '/jobs',
@@ -562,6 +573,35 @@ export const createExperiment = async (name: string, token: string): Promise<Zal
     token,
   );
   return { name: raw.name, experimentId: raw.experiment_id };
+};
+
+/** Ответ PATCH /runs/{run_id} (тикет #27/#28). */
+export interface ZalaRunRenameResult {
+  runId: string;
+  runName: string;
+}
+
+/**
+ * Переименовать прогон MLflow (PATCH /runs/{run_id}, тикеты #27/#28).
+ *
+ * Валидация имени — на сервере (1–64 символа: буквы, цифры, `-`, `_`,
+ * пробел); при невалидном имени сервис отвечает 400 (`ZalaApiError`),
+ * при отсутствии прогона — 404.
+ */
+export const renameRun = async (
+  runId: string,
+  name: string,
+  token: string,
+): Promise<ZalaRunRenameResult> => {
+  const raw = await request<{ run_id?: string; run_name?: string; name?: string }>(
+    `/runs/${encodeURIComponent(runId)}`,
+    { method: 'PATCH', body: JSON.stringify({ name }) },
+    token,
+  );
+  return {
+    runId: raw.run_id ?? runId,
+    runName: raw.run_name ?? raw.name ?? name,
+  };
 };
 
 /** Состояние сервиса. */

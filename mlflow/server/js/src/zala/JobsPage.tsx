@@ -239,6 +239,8 @@ export const JobsPage = () => {
   const [experimentOptions, setExperimentOptions] = useState<string[]>([DEFAULT_EXPERIMENT]);
   const [experiment, setExperiment] = useState<string>(DEFAULT_EXPERIMENT);
   const [newExperiment, setNewExperiment] = useState<string>('');
+  // Тикет #28: необязательное имя прогона. Пусто -> сервис вычислит дефолт.
+  const [runName, setRunName] = useState<string>('');
   const [seed, setSeed] = useState<string>('42');
   const [epochs, setEpochs] = useState<string>('1');
   const [scheduledAt, setScheduledAt] = useState<string>('');
@@ -597,6 +599,7 @@ export const JobsPage = () => {
             priority: priorityValue,
             timeLimitS,
             modelRoles: roles,
+            name: runName.trim() || undefined,
           },
           token,
         );
@@ -622,6 +625,7 @@ export const JobsPage = () => {
             priority: priorityValue,
             timeLimitS,
             modelRoles: roles,
+            name: runName.trim() || undefined,
           },
           token,
         );
@@ -645,6 +649,7 @@ export const JobsPage = () => {
             timeLimitS,
             // Роли — только у внешних датасетов (у служебных тасков их нет).
             modelRoles: {},
+            name: runName.trim() || undefined,
           },
           token,
         );
@@ -682,6 +687,7 @@ export const JobsPage = () => {
     scheduledAt,
     experiment,
     newExperiment,
+    runName,
     temperature,
     maxTokens,
     reasoningEffort,
@@ -1196,6 +1202,17 @@ export const JobsPage = () => {
                 validationState={newExperiment.includes('/') ? 'error' : undefined}
               />
             )}
+          </div>
+
+          <div>
+            <Typography.Text color="secondary">Название</Typography.Text>
+            <Input
+              componentId="zala.jobs.form.name"
+              value={runName}
+              onChange={(e) => setRunName(e.target.value)}
+              placeholder="необязательно, напр. ночной-hle"
+              maxLength={64}
+            />
           </div>
 
           {selection.length > 0 && (
