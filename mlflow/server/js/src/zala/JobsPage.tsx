@@ -434,8 +434,18 @@ export const JobsPage = () => {
     setEstimate(null);
     setEstimateError(null);
     const estimateTask =
-      selectedExternalDatasets[0] ?? selectedServiceTasks[0] ?? serviceTasks[0] ?? '';
-    const estimateDataset = selectedExternalDatasets[0] ?? localDataset;
+      selectedExternalDatasets[0] ??
+      selectedLocalTasks[0]?.task ??
+      selectedServiceTasks[0] ??
+      serviceTasks[0] ??
+      '';
+    const estimateDataset =
+      selectedExternalDatasets[0] ?? selectedLocalTasks[0]?.dataset ?? localDataset;
+    // Пустой таск -> /estimate отдаёт 422 и в форме всплывает «Something went
+    // wrong». Оценки нет — это не ошибка, просто не запрашиваем.
+    if (!estimateTask) {
+      return undefined;
+    }
     const timer = window.setTimeout(() => {
       estimateJob(estimateTask, model, undefined, estimateDataset)
         .then((result) => {
@@ -453,7 +463,14 @@ export const JobsPage = () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [selectedExternalDatasets, selectedServiceTasks, serviceTasks, localDataset, model]);
+  }, [
+    selectedExternalDatasets,
+    selectedLocalTasks,
+    selectedServiceTasks,
+    serviceTasks,
+    localDataset,
+    model,
+  ]);
 
   /**
    * Тикет #8: единый выбор. Внешние датасеты можно отмечать несколько —
