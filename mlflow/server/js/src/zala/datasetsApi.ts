@@ -27,6 +27,12 @@ export interface ZalaDatasetSummary {
    * Пусто — датасет не использует отдельных ролей.
    */
   roles: Record<string, string>;
+  /**
+   * Таски, допустимые для датасета (реестр `DATASET_TASKS`).
+   * Пусто — ограничения нет: локальный принимает любой таск, внешний —
+   * таск с именем датасета.
+   */
+  tasks: string[];
 }
 
 /** Сэмпл датасета (SampleOut из zalabench-api). */
@@ -56,6 +62,7 @@ interface RawDatasetSummary {
   kind?: 'local' | 'external';
   revision?: string | null;
   roles?: Record<string, string>;
+  tasks?: string[];
 }
 
 /** Строка SampleOut в ответе сервиса (snake_case). */
@@ -84,6 +91,7 @@ const toDatasetSummary = (raw: RawDatasetSummary): ZalaDatasetSummary => ({
   kind: raw.kind ?? 'local',
   revision: raw.revision ?? null,
   roles: raw.roles ?? {},
+  tasks: raw.tasks ?? [],
 });
 
 /** snake_case -> camelCase (sample). */

@@ -266,8 +266,19 @@ export const JobsPage = () => {
     () => datasetOptions.filter((item) => item.kind === 'external'),
     [datasetOptions],
   );
+  // Локальные датасеты, объявившие свои таски (реестр `DATASET_TASKS`):
+  // выбираются как обычный пункт, каждый таск -> отдельная задача.
+  const localTaskDatasets = useMemo(
+    () => datasetOptions.filter((item) => item.kind === 'local' && item.tasks.length > 0),
+    [datasetOptions],
+  );
+  // Датасет для служебных тасков: локальный БЕЗ объявленных тасков
+  // (various_eval_dev). Иначе первый по алфавиту локальный датасет
+  // (например math_tooluse) подменял бы его у hello/agent_*.
   const localDataset = useMemo(
-    () => datasetOptions.find((item) => item.kind === 'local')?.name ?? DEFAULT_DATASET,
+    () =>
+      datasetOptions.find((item) => item.kind === 'local' && item.tasks.length === 0)?.name ??
+      DEFAULT_DATASET,
     [datasetOptions],
   );
   const serviceTasks = useMemo(
@@ -281,6 +292,18 @@ export const JobsPage = () => {
   const selectedServiceTasks = useMemo(
     () => selection.filter((name) => serviceTasks.includes(name)),
     [selection, serviceTasks],
+  );
+  // Выбранные таски локальных датасетов: "датасет::таск".
+  const selectedLocalTasks = useMemo(
+    () =>
+      selection
+        .filter((name) => name.includes('::'))
+        .map((name) => {
+          const [dataset, task] = name.split('::');
+          return { dataset, task };
+        })
+        .filter(({ dataset }) => localTaskDatasets.some((item) => item.name === dataset)),
+    [selection, localTaskDatasets],
   );
   // Составной прогон — только внешние датасеты (локальный таска не задаёт).
   const isGroupRun = selectedExternalDatasets.length >= 2;
@@ -662,6 +685,35 @@ export const JobsPage = () => {
           );
         }
       }
+      // Локальные датасеты со своими тасками (math_tooluse и т.п.):
+      // каждый выбранный таск -> отдельная задача на своём датасете.
+      for (const { dataset, task } of selectedLocalTasks) {
+        const job = await createJob(
+          {
+            task,
+            dataset,
+            model,
+            seed: seedValue,
+            epochs: epochsValue,
+            scheduledAt: scheduledAt || undefined,
+            experiment: experimentName,
+            knobs,
+            priority: priorityValue,
+            timeLimitS,
+            modelRoles: {},
+            name: runName.trim() || undefined,
+          },
+          token,
+        );
+        created.push(job.jobId.slice(0, 8));
+        if (!isGroupRun && selectedExternalDatasets.length === 0) {
+          setSubmitNotice(
+            selectedLocalTasks.length === 1
+              ? `Job ${created[created.length - 1]} поставлен в очередь.`
+              : `Поставлено задач: ${created.length} (${created.join(', ')}).`,
+          );
+        }
+      }
       await refresh(false);
     } catch (e: unknown) {
       if (e instanceof ZalaApiError && e.status === 401) {
@@ -680,6 +732,7 @@ export const JobsPage = () => {
     model,
     selectedExternalDatasets,
     selectedServiceTasks,
+    selectedLocalTasks,
     isGroupRun,
     localDataset,
     availableRoles,
@@ -1123,6 +1176,32 @@ export const JobsPage = () => {
               )}
             </div>
           </div>
+
+          {localTaskDatasets.length > 0 && (
+            <div>
+              <Typography.Text color="secondary">Локальные датасеты</Typography.Text>
+              <Typography.Paragraph color="secondary" css={{ fontSize: 12, marginBottom: theme.spacing.xs }}>
+                Свои датасеты со своими тасками; каждый таск — отдельная задача.
+              </Typography.Paragraph>
+              <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+                {localTaskDatasets.flatMap((item) =>
+                  item.tasks.map((task) => {
+                    const key = `${item.name}::${task}`;
+                    return (
+                      <Checkbox
+                        key={key}
+                        componentId="zala.jobs.form.local_task"
+                        isChecked={selection.includes(key)}
+                        onChange={(checked) => onSelectionToggle(key, checked)}
+                      >
+                        {item.name} · {task} · {item.samples} сэмплов
+                      </Checkbox>
+                    );
+                  }),
+                )}
+              </div>
+            </div>
+          )}
 
           <div>
             <Typography.Text color="secondary">Служебные</Typography.Text>
