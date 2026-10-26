@@ -39,8 +39,7 @@ def published_issues() -> list[dict[str, Any]]:
 
 
 def issue_body(group: dict[str, Any]) -> str:
-    evidence = "\n".join(f"- {item}" for item in group["evidence"])
-    body = f"{group['summary']}\n\n### Evidence\n\n{evidence}"
+    body = f"{group['summary']}\n\n### Evidence\n\n{group['evidence']}"
     jobs = "\n".join(
         f"- [{job['workflow_name']} / {job['job_name']}]({job['job_run_url']})"
         for job in group["jobs"]

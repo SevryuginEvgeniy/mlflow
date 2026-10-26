@@ -5,7 +5,6 @@ required: [groups]
 properties:
   groups:
     type: array
-    description: Non-transient causes; jobs may appear in several causes.
     items:
       $ref: "#/$defs/group"
 $defs:
@@ -14,15 +13,12 @@ $defs:
     required: [workflow_name, job_name, job_run_url]
     properties:
       workflow_name:
-        description: Name of the GitHub Actions run (`run.name`).
         type: string
         minLength: 1
       job_name:
-        description: Name of the affected job (`job.name`).
         type: string
         minLength: 1
       job_run_url:
-        description: Attempt-pinned URL of the failed GitHub Actions job.
         type: string
         pattern: '^https://github\.com/mlflow/mlflow/actions/runs/[0-9]+/attempts/[0-9]+/job/[0-9]+$'
   group:
@@ -37,6 +33,7 @@ $defs:
       summary:
         type: string
         minLength: 1
+        maxLength: 1000
       jobs:
         type: array
         minItems: 1
@@ -44,13 +41,10 @@ $defs:
         items:
           $ref: "#/$defs/job"
       evidence:
-        type: array
-        minItems: 1
-        items:
-          type: string
-          minLength: 1
+        type: string
+        minLength: 1
+        maxLength: 2000
       title:
-        # The publisher builds issue bodies from the other report fields.
         type: string
         minLength: 1
         maxLength: 200

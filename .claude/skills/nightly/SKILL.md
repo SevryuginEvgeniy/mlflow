@@ -19,9 +19,7 @@ Save the scheduled-run, job-list, and open-issue responses before
 inspecting them. Fetch these once per invocation and reuse the saved files
 throughout the investigation.
 
-The monitored workflows are listed below; currently only cross-version tests are
-included. Fetch each workflow's latest scheduled run and the jobs for each failed
-run:
+Fetch each workflow's latest scheduled run and the jobs for each failed run:
 
 ```bash
 workflow_files=(cross-version-tests.yml)
@@ -86,7 +84,8 @@ is insufficient or the investigation is incomplete.
 ## Report and validate
 
 Reconcile findings across groups and cover every non-transient failed job. Separate
-causes may share a job; several jobs may share one cause. Omit transient failures.
+causes may share a job; several jobs may share one cause.
+Format `evidence` as Markdown.
 
 Write `$out_dir/report.json`, then validate it and fix any errors before finishing:
 
