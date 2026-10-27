@@ -1195,7 +1195,7 @@ export const JobsPage = () => {
                             {isPending ? 'Отмена…' : 'Отменить'}
                           </Button>
                         )}
-                        {job.status === 'failed' && (
+                        {['failed', 'cancelled'].includes(job.status) && (
                           <Button
                             componentId="zala.jobs.retry"
                             onClick={() => onRetry(job.jobId)}

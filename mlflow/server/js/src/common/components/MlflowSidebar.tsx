@@ -235,6 +235,18 @@ export function MlflowSidebar({
         },
         componentId: 'zala.sidebar.datasets_tab_link',
       },
+      {
+        key: 'zala-leaderboard',
+        icon: <BeakerIcon />,
+        linkProps: {
+          to: '/zala/leaderboard',
+          isActive: (location: Location) => location.pathname.startsWith('/zala/leaderboard'),
+          children: (
+            <FormattedMessage defaultMessage="ZALABench · Лидерборд" description="Sidebar link for ZALABench leaderboard page" />
+          ),
+        },
+        componentId: 'zala.sidebar.leaderboard_tab_link',
+      },
       ...(shouldShowGenAIFeatures(enableWorkflowBasedNavigation, workflowType) && !showNestedExperimentItems
         ? [
             {
