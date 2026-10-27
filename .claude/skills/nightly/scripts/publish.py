@@ -52,10 +52,10 @@ def issue_marker(title: str, body: str) -> str:
     return f"<!-- nightly-group:{digest} -->"
 
 
-def publish(report: dict[str, Any], *, dry_run: bool) -> None:
+def publish(analysis: dict[str, Any], *, dry_run: bool) -> None:
     new_count = 0
     existing: list[dict[str, Any]] | None = None
-    for group in report["groups"]:
+    for group in analysis["groups"]:
         if group["verdict"] != "new":
             sys.stdout.write(f"{group['verdict']}: {group['summary']}\n")
             continue
@@ -84,9 +84,9 @@ def publish(report: dict[str, Any], *, dry_run: bool) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Print or create nightly issues")
-    parser.add_argument("report", type=Path)
+    parser.add_argument("analysis", type=Path)
     parser.add_argument(
         "--dry-run", action="store_true", help="Print issue drafts without creating issues"
     )
     args = parser.parse_args()
-    publish(json.loads(args.report.read_text()), dry_run=args.dry_run)
+    publish(json.loads(args.analysis.read_text()), dry_run=args.dry_run)

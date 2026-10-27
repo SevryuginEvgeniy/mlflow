@@ -11,6 +11,10 @@ on:
         required: false
         type: boolean
         default: true
+      run_ids:
+        description: "Space-separated workflow run IDs; empty uses the latest scheduled runs"
+        required: false
+        type: string
 
 concurrency:
   group: nightly
@@ -58,6 +62,27 @@ jobs:
     outputs:
       analysis_artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
+      - name: Resolve run IDs
+        id: runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_IDS: ${{ inputs.run_ids }}
+        run: |
+          if [ -z "$RUN_IDS" ]; then
+            # TODO: Add more nightly workflows.
+            workflow_files=(cross-version-tests.yml)
+            for workflow_file in "${workflow_files[@]}"; do
+              run_id=$(gh api "repos/mlflow/mlflow/actions/workflows/$workflow_file/runs?event=schedule&per_page=1" \
+                --jq '.workflow_runs[0].id // empty')
+              RUN_IDS+=" $run_id"
+            done
+          fi
+          run_ids=$(jq -ern --arg ids "$RUN_IDS" '
+            [$ids | splits("\\s+") | select(length > 0)] | unique
+            | if length > 0 and all(test("^[1-9][0-9]*$")) then join(" ")
+              else error("Expected one or more numeric workflow run IDs") end
+          ')
+          printf 'run_ids=%s\n' "$run_ids" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -130,6 +155,7 @@ jobs:
       - name: Analyze failures in isolated worktrees
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_IDS: ${{ steps.runs.outputs.run_ids }}
           ANTHROPIC_BASE_URL: http://localhost:8080/anthropic
           ANTHROPIC_AUTH_TOKEN: ${{ steps.gateway-proxy.outputs.token }}
           ANTHROPIC_CUSTOM_HEADERS: ${{ steps.gateway.outputs.custom-headers }}
@@ -159,13 +185,13 @@ jobs:
               --disallowed-tools WebSearch \
               --settings '{"worktree":{"baseRef":"head"}}' \
               --print --verbose --output-format stream-json \
-              "/nightly /tmp/nightly-out" \
+              "/nightly /tmp/nightly-out \"$RUN_IDS\"" \
             | .claude/scripts/stream.sh "$RUNNER_TEMP/nightly-analysis/stream.jsonl"
-      - name: Stage analysis report
+      - name: Stage analysis
         run: |
           umask 077
-          srt --settings "$RUNNER_TEMP/nightly-srt.json" -- cat /tmp/nightly-out/report.json \
-            > "$RUNNER_TEMP/nightly-analysis/report.json"
+          srt --settings "$RUNNER_TEMP/nightly-srt.json" -- cat /tmp/nightly-out/analysis.json \
+            > "$RUNNER_TEMP/nightly-analysis/analysis.json"
       - name: Stop gateway proxy
         if: always()
         run: |
@@ -204,10 +230,10 @@ jobs:
           artifact-ids: ${{ needs.analyze.outputs.analysis_artifact_id }}
           path: /tmp/nightly-analysis
           merge-multiple: true
-      - name: Validate report
+      - name: Validate analysis
         run: |
           uvx check-jsonschema@0.37.4 \
-            --schemafile .claude/skills/nightly/output.schema.yaml /tmp/nightly-analysis/report.json
+            --schemafile .claude/skills/nightly/output.schema.yaml /tmp/nightly-analysis/analysis.json
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         if: github.event_name == 'schedule' || !inputs.dry_run
@@ -233,4 +259,4 @@ jobs:
               --description 'Failures detected by scheduled CI jobs.' --force
           fi
           python .claude/skills/nightly/scripts/publish.py \
-            /tmp/nightly-analysis/report.json "${args[@]}"
+            /tmp/nightly-analysis/analysis.json "${args[@]}"
