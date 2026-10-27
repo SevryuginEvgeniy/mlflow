@@ -26,7 +26,7 @@ import {
 
 import type { ZalaDatasetSummary } from './datasetsApi';
 import { listDatasets } from './datasetsApi';
-import { buildLongctxKnobs, isLongctxSelected } from './longctxKnobs';
+import { LONGCTX_DEFAULTS, buildLongctxKnobs, isLongctxSelected } from './longctxKnobs';
 import type { ZalaEstimate, ZalaJob } from './jobsApi';
 import {
   ZalaApiError,
@@ -245,14 +245,17 @@ export const JobsPage = () => {
   const [seed, setSeed] = useState<string>('42');
   const [epochs, setEpochs] = useState<string>('1');
   // longctx_stress Q1: параллельные запросы (knobs.max_samples, 1..256).
-  const [maxSamples, setMaxSamples] = useState<string>('');
+  // Дефолт 1 — видно, сколько запросов идёт в параллель (B-96).
+  const [maxSamples, setMaxSamples] = useState<string>('1');
   // W5C §11.2: ручки стресс-теста longctx_stress — видны только для его
   // датасета/таска (см. isLongctxSelected), пустое = не передаём (канон limit).
-  const [ctxMin, setCtxMin] = useState<string>('');
-  const [ctxMax, setCtxMax] = useState<string>('');
-  const [turnMin, setTurnMin] = useState<string>('');
-  const [turnMax, setTurnMax] = useState<string>('');
-  const [durationMin, setDurationMin] = useState<string>('');
+  // Дефолты — из спеки §11.2 (B-92): поля показывают значения по умолчанию,
+  // чтобы пользователь видел, с чем работает, и мог осознанно изменить.
+  const [ctxMin, setCtxMin] = useState<string>(String(LONGCTX_DEFAULTS.ctxMin));
+  const [ctxMax, setCtxMax] = useState<string>(String(LONGCTX_DEFAULTS.ctxMax));
+  const [turnMin, setTurnMin] = useState<string>(String(LONGCTX_DEFAULTS.turnMin));
+  const [turnMax, setTurnMax] = useState<string>(String(LONGCTX_DEFAULTS.turnMax));
+  const [durationMin, setDurationMin] = useState<string>(String(LONGCTX_DEFAULTS.durationMin));
   const [scheduledAt, setScheduledAt] = useState<string>('');
   // Ф5.8e: приоритет очереди, watchdog (минуты в UI, секунды в API) и роли.
   const [priority, setPriority] = useState<string>('0');
@@ -262,7 +265,8 @@ export const JobsPage = () => {
   // Ф5.8e: раскрытые строки таблицы (роли моделей не влезают в 12 колонок).
 
   // Ф5.1: ручки генерации. Основные — всегда на виду, расширенные — свёрнуты.
-  const [temperature, setTemperature] = useState<string>('0');
+  // Дефолт 0.8 — совпадает с DEFAULT_KNOBS API (B-92).
+  const [temperature, setTemperature] = useState<string>('0.8');
   const [maxTokens, setMaxTokens] = useState<string>('');
   const [reasoningEffort, setReasoningEffort] = useState<string>('auto');
   const [systemPrompt, setSystemPrompt] = useState<string>('');
@@ -1402,14 +1406,14 @@ export const JobsPage = () => {
               />
             </div>
             <div css={{ flex: 1 }}>
-              <Typography.Text color="secondary">Параллельные запросы (пусто — по умолчанию)</Typography.Text>
+              <Typography.Text color="secondary">Параллельные запросы</Typography.Text>
               <Input
                 componentId="zala.jobs.form.max_samples"
                 type="number"
                 min={1}
                 max={256}
                 value={maxSamples}
-                placeholder="по умолчанию"
+                placeholder="1"
                 onChange={(e) => setMaxSamples(e.target.value)}
               />
             </div>

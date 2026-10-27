@@ -512,6 +512,35 @@ export const DatasetsPage = () => {
             {detailLoading && <Spinner size="small" />}
           </div>
 
+          {/* Описание датасета: что проверяет и как устроен эксперимент.
+              Текст — markdown из docs/datasets/<name>.md (рендерим как pre-wrap). */}
+          {!detailError && detail?.description && (
+            <div
+              css={{
+                padding: theme.spacing.md,
+                border: `1px solid ${theme.colors.border}`,
+                borderRadius: theme.general.borderRadiusBase,
+                background: theme.colors.backgroundSecondary,
+              }}
+            >
+              <Typography.Title level={5} css={{ marginTop: 0 }}>
+                О датасете
+              </Typography.Title>
+              <div
+                css={{
+                  whiteSpace: 'pre-wrap',
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  maxHeight: 420,
+                  overflow: 'auto',
+                }}
+              >
+                {detail.description}
+              </div>
+            </div>
+          )}
+
           {/* E2: датасет не найден (404). */}
           {detailError && (
             <Alert

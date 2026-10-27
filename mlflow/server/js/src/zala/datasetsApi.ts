@@ -33,6 +33,11 @@ export interface ZalaDatasetSummary {
    * таск с именем датасета.
    */
   tasks: string[];
+  /**
+   * Описание датасета (markdown из docs/datasets/<name>.md): что проверяет,
+   * как устроен эксперимент, за что отвечают настройки. Пусто — описания нет.
+   */
+  description: string;
 }
 
 /** Сэмпл датасета (SampleOut из zalabench-api). */
@@ -63,6 +68,7 @@ interface RawDatasetSummary {
   revision?: string | null;
   roles?: Record<string, string>;
   tasks?: string[];
+  description?: string;
 }
 
 /** Строка SampleOut в ответе сервиса (snake_case). */
@@ -92,6 +98,7 @@ const toDatasetSummary = (raw: RawDatasetSummary): ZalaDatasetSummary => ({
   revision: raw.revision ?? null,
   roles: raw.roles ?? {},
   tasks: raw.tasks ?? [],
+  description: raw.description ?? '',
 });
 
 /** snake_case -> camelCase (sample). */

@@ -16,6 +16,18 @@
 export const LONGCTX_DATASET = 'longctx_stress';
 
 /**
+ * Значения по умолчанию (спека §11.2) — показываются в полях, чтобы
+ * пользователь видел, с каким профилем работает (B-92).
+ */
+export const LONGCTX_DEFAULTS = {
+  ctxMin: 50000,
+  ctxMax: 300000,
+  turnMin: 5000,
+  turnMax: 50000,
+  durationMin: 30,
+} as const;
+
+/**
  * Выбран ли longctx_stress: элемент выбора — либо сам датасет, либо
  * `"датасет::таск"`. Похожие имена (`longctx_stress_v2::x`) не считаются.
  */
