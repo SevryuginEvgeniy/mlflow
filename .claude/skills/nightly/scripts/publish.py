@@ -1,5 +1,4 @@
 import argparse
-import hashlib
 import json
 import subprocess
 import sys
@@ -20,24 +19,6 @@ def post(endpoint: str, data: Any = None) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(result.stdout)) if result.stdout.strip() else {}
 
 
-def published_issues() -> list[dict[str, Any]]:
-    result = subprocess.run(
-        [
-            "gh",
-            "api",
-            "--paginate",
-            "--slurp",
-            f"repos/{REPOSITORY}/issues?state=all&labels=nightly&per_page=100",
-        ],
-        stdout=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
-    return [
-        issue for page in json.loads(result.stdout) for issue in page if "pull_request" not in issue
-    ]
-
-
 def issue_body(group: dict[str, Any]) -> str:
     body = f"{group['summary']}\n\n### Evidence\n\n{group['evidence']}"
     jobs = "\n".join(
@@ -47,37 +28,21 @@ def issue_body(group: dict[str, Any]) -> str:
     return f"{body}\n\n### Failed jobs\n\n{jobs}"
 
 
-def issue_marker(title: str, body: str) -> str:
-    digest = hashlib.sha256(json.dumps({"title": title, "body": body}).encode()).hexdigest()
-    return f"<!-- nightly-group:{digest} -->"
-
-
 def publish(analysis: dict[str, Any], *, dry_run: bool) -> None:
     new_count = 0
-    existing: list[dict[str, Any]] | None = None
     for group in analysis["groups"]:
         if group["verdict"] != "new":
             sys.stdout.write(f"{group['verdict']}: {group['summary']}\n")
             continue
         body = issue_body(group)
-        marker = issue_marker(group["title"], body)
-        body = f"{body}\n\n{marker}"
         new_count += 1
         if dry_run:
             sys.stdout.write(f"Would create issue: {group['title']}\n\n{body}\n\n")
         else:
-            if existing is None:
-                existing = published_issues()
-            match = next((issue for issue in existing if marker in (issue.get("body") or "")), None)
-            if match:
-                sys.stdout.write(f"Already created {match['html_url']}\n")
-                continue
             number = post("issues", {"title": group["title"], "body": body, "labels": ["nightly"]})[
                 "number"
             ]
-            url = f"https://github.com/{REPOSITORY}/issues/{number}"
-            existing.append({"body": body, "html_url": url})
-            sys.stdout.write(f"Created {url}\n")
+            sys.stdout.write(f"Created https://github.com/{REPOSITORY}/issues/{number}\n")
     if new_count == 0:
         sys.stdout.write("No new nightly issues.\n")
 
