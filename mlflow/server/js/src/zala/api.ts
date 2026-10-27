@@ -68,7 +68,8 @@ interface MlflowRun {
     experiment_id?: string;
   };
   data?: {
-    metrics?: Array<{ key: string; value: number }>;
+    /** `value` — число, но `NaN`/`Infinity` сервер отдаёт строкой. */
+    metrics?: Array<{ key: string; value: number | string }>;
     params?: Array<{ key: string; value: string }>;
     tags?: Array<{ key: string; value: string }>;
   };
@@ -91,6 +92,42 @@ const keyValueToRecord = <T>(items?: Array<{ key: string; value: T }>): Record<s
   const result: Record<string, T> = {};
   (items ?? []).forEach(({ key, value }) => {
     result[key] = value;
+  });
+  return result;
+};
+
+/**
+ * Приводит значение метрики к числу.
+ *
+ * MLflow хранит `NaN`/`Infinity` в БД, но в JSON их нет — сервер отдаёт их
+ * строкой (`"NaN"`), поэтому `Record<string, number>` на деле содержит строки
+ * и `value.toFixed()` падает. `NaN` сохраняем как `NaN` (метрика существует,
+ * значение не вычислилось — UI покажет прочерк), а мусорную строку
+ * превращаем в `undefined`.
+ */
+const toMetricNumber = (value: unknown): number | undefined => {
+  if (typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    // `Number('NaN')` тоже NaN — отличаем настоящее «нет значения» от мусора.
+    if (Number.isNaN(parsed) && value.trim().toLowerCase() !== 'nan') {
+      return undefined;
+    }
+    return parsed;
+  }
+  return undefined;
+};
+
+/** Метрики прогона: значения приводятся к числам, нечисловые отбрасываются. */
+const metricsToRecord = (items?: Array<{ key: string; value: unknown }>): Record<string, number> => {
+  const result: Record<string, number> = {};
+  (items ?? []).forEach(({ key, value }) => {
+    const parsed = toMetricNumber(value);
+    if (parsed !== undefined) {
+      result[key] = parsed;
+    }
   });
   return result;
 };
@@ -219,7 +256,7 @@ export const searchZalaRuns = async (experimentIds: string[], query: ZalaRunsQue
   const payload = await postJson<{ runs?: MlflowRun[]; next_page_token?: string }>('/api/2.0/mlflow/runs/search', body);
   const rawRuns = payload.runs ?? [];
   const runs = rawRuns.map((run): ZalaRunSummary => {
-    const metrics = keyValueToRecord(run.data?.metrics);
+    const metrics = metricsToRecord(run.data?.metrics);
     const params = keyValueToRecord(run.data?.params);
     const tags = keyValueToRecord(run.data?.tags);
     return {

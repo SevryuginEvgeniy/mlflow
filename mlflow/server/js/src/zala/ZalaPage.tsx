@@ -157,8 +157,19 @@ const collectMetrics = (run: ZalaRunSummary, prefix: string): MetricRow[] => {
     }));
 };
 
-/** Компактный вывод числа (без хвостовых нулей). */
-const formatNumber = (value: number): string => String(Number(value.toFixed(4)));
+/**
+ * Компактный вывод числа (без хвостовых нулей).
+ *
+ * Принимает и строку: `NaN`/`Infinity` приходят из API строкой, а нечисловое
+ * значение показываем прочерком вместо падения на `toFixed`.
+ */
+const formatNumber = (value: number | string | null | undefined): string => {
+  const numeric = typeof value === 'string' ? Number(value) : value;
+  if (typeof numeric !== 'number' || !Number.isFinite(numeric)) {
+    return '—';
+  }
+  return String(Number(numeric.toFixed(4)));
+};
 
 /**
  * Дата в списке прогонов: `26.10 14:32` (тикет #23). Полная дата с

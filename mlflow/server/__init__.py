@@ -113,6 +113,24 @@ def version():
     return VERSION, 200
 
 
+# Provide the current-user endpoint even when auth is disabled.
+#
+# The UI sidebar queries it on every page. Without auth the route was only
+# registered by the ``basic-auth`` app, so a plain server answered 404 and the
+# browser console filled with failed requests. The basic-auth app registers its
+# own (richer) handler on the same paths and takes precedence when enabled.
+@app.route(_add_static_prefix("/ajax-api/2.0/mlflow/users/current"))
+@app.route(_add_static_prefix("/api/2.0/mlflow/users/current"))
+def current_user_without_auth():
+    from flask import jsonify
+
+    auth_mod = sys.modules.get("mlflow.server.auth")
+    if not (auth_mod and auth_mod.is_auth_enabled()):
+        return jsonify({"user": None, "is_basic_auth": False})
+    # Auth app owns the route; this only runs if it somehow did not register.
+    return auth_mod.get_current_user()
+
+
 # Serve the "get-artifact" route.
 @app.route(_add_static_prefix("/get-artifact"))
 def serve_artifacts():
