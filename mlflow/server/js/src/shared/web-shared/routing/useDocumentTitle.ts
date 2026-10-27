@@ -8,7 +8,7 @@ interface UseDocumentTitleProps {
 }
 
 export const useDocumentTitle = ({ skip, title }: UseDocumentTitleProps) => {
-  const productName = 'MLflow';
+  const productName = 'ZALABench';
 
   useEffect(() => {
     if (skip) {

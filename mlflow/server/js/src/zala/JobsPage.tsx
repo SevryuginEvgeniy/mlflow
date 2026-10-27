@@ -70,6 +70,12 @@ const NEW_EXPERIMENT_VALUE = '__new__';
  */
 const REASONING_EFFORT_OPTIONS = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max'];
 
+/**
+ * Песочница агентских тасков (W2C). `auto` — ручку не передавать: сервис
+ * подставит REQUIRED_SANDBOX по таску (W1B), иначе останется `local`.
+ */
+const SANDBOX_OPTIONS = ['auto', 'local', 'docker'];
+
 /** Бейдж статуса job'а. */
 /** Статусы, строку которых можно удалить из очереди (Ф5 §8.1). */
 const DELETABLE_STATUSES = ['pending', 'failed', 'done', 'cancelled', 'partial'];
@@ -269,6 +275,8 @@ export const JobsPage = () => {
   const [temperature, setTemperature] = useState<string>('0.8');
   const [maxTokens, setMaxTokens] = useState<string>('');
   const [reasoningEffort, setReasoningEffort] = useState<string>('auto');
+  // W2C: песочница агентских тасков. `auto` — ключ не передаём (W1B подставит).
+  const [sandbox, setSandbox] = useState<string>('auto');
   const [systemPrompt, setSystemPrompt] = useState<string>('');
   const [topP, setTopP] = useState<string>('');
   const [topK, setTopK] = useState<string>('');
@@ -630,6 +638,11 @@ export const JobsPage = () => {
     if (reasoningEffort !== 'auto') {
       knobs['reasoning_effort'] = reasoningEffort;
     }
+    // W2C: `auto` — ключа нет вовсе (не пустая строка/undefined), сервис
+    // подставит REQUIRED_SANDBOX; явный `local` для math_python даёт 422.
+    if (sandbox !== 'auto') {
+      knobs['sandbox'] = sandbox;
+    }
     if (systemPrompt.trim()) {
       knobs['system_prompt'] = systemPrompt.trim();
     }
@@ -812,6 +825,7 @@ export const JobsPage = () => {
     temperature,
     maxTokens,
     reasoningEffort,
+    sandbox,
     systemPrompt,
     topP,
     topK,
@@ -1556,6 +1570,25 @@ export const JobsPage = () => {
                   рассуждений между none и max.
                 </Typography.Text>
               )}
+            </div>
+            <div>
+              <Typography.Text color="secondary">Песочница (агентские таски)</Typography.Text>
+              <SimpleSelect
+                id="zala-jobs-sandbox"
+                componentId="zala.jobs.form.sandbox"
+                value={sandbox}
+                onChange={({ target }) => setSandbox(target.value)}
+              >
+                {SANDBOX_OPTIONS.map((option) => (
+                  <SimpleSelectOption key={option} value={option}>
+                    {option}
+                  </SimpleSelectOption>
+                ))}
+              </SimpleSelect>
+              <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                auto — песочницу выберет сервис по таску (math_python → docker).
+                Явный local для math_python даёт 422.
+              </Typography.Text>
             </div>
             <div>
               <Typography.Text color="secondary">

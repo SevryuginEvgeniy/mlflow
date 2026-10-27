@@ -38,7 +38,7 @@ import { SERVER_FEATURE_KEYS, useFeatureEnabled } from '../../experiment-trackin
 import { extractWorkspaceFromSearchParams, useActiveWorkspace } from '../../workspaces/utils/WorkspaceUtils';
 import { SETTINGS_RETURN_TO_PARAM, SETTINGS_SECTION_GENERAL } from '../../settings/settingsSectionConstants';
 import { getSidebarItemStyles, MlflowSidebarLink } from './MlflowSidebarLink';
-import { MlflowLogo } from './MlflowLogo';
+import { ZalaLogo } from '../../zala/ZalaLogo';
 import { DOCS_ROOT, GenAIDocsUrl, MLDocsUrl, Version } from '../constants';
 import { WorkspaceSelector } from '../../workspaces/components/WorkspaceSelector';
 import { MlflowSidebarExperimentItems } from './MlflowSidebarExperimentItems';
@@ -340,7 +340,7 @@ export function MlflowSidebar({
         {showSidebar && (
           <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
             <Link componentId="mlflow.sidebar.logo_home_link" to={ExperimentTrackingRoutes.rootRoute}>
-              <MlflowLogo
+              <ZalaLogo
                 css={{
                   display: 'block',
                   height: theme.spacing.lg,
