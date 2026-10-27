@@ -26,6 +26,7 @@ import {
 
 import type { ZalaDatasetSummary } from './datasetsApi';
 import { listDatasets } from './datasetsApi';
+import { buildLongctxKnobs, isLongctxSelected } from './longctxKnobs';
 import type { ZalaEstimate, ZalaJob } from './jobsApi';
 import {
   ZalaApiError,
@@ -243,6 +244,15 @@ export const JobsPage = () => {
   const [runName, setRunName] = useState<string>('');
   const [seed, setSeed] = useState<string>('42');
   const [epochs, setEpochs] = useState<string>('1');
+  // longctx_stress Q1: параллельные запросы (knobs.max_samples, 1..256).
+  const [maxSamples, setMaxSamples] = useState<string>('');
+  // W5C §11.2: ручки стресс-теста longctx_stress — видны только для его
+  // датасета/таска (см. isLongctxSelected), пустое = не передаём (канон limit).
+  const [ctxMin, setCtxMin] = useState<string>('');
+  const [ctxMax, setCtxMax] = useState<string>('');
+  const [turnMin, setTurnMin] = useState<string>('');
+  const [turnMax, setTurnMax] = useState<string>('');
+  const [durationMin, setDurationMin] = useState<string>('');
   const [scheduledAt, setScheduledAt] = useState<string>('');
   // Ф5.8e: приоритет очереди, watchdog (минуты в UI, секунды в API) и роли.
   const [priority, setPriority] = useState<string>('0');
@@ -317,6 +327,8 @@ export const JobsPage = () => {
   );
   // Составной прогон — только внешние датасеты (локальный таска не задаёт).
   const isGroupRun = selectedExternalDatasets.length >= 2;
+  // W5C §11.2: поля стресс-теста видны только при выборе longctx_stress.
+  const isLongctx = isLongctxSelected(selection);
   // Внешний датасет: system prompt вшит в inspect_evals (Ф5.1).
   const isExternalDataset = selectedExternalDatasets.length > 0;
   // Тикет #16: роли — объединение ролей выбранных датасетов (роль -> описание).
@@ -586,6 +598,31 @@ export const JobsPage = () => {
       }
       knobs['max_tokens'] = value;
     }
+    // longctx_stress Q1: параллельные запросы (уровень потоков стресс-теста).
+    if (maxSamples.trim() !== '') {
+      const value = Number(maxSamples);
+      if (!Number.isInteger(value) || value < 1 || value > 256) {
+        setSubmitError('параллельные запросы: пусто (по умолчанию) или целое 1..256');
+        return;
+      }
+      knobs['max_samples'] = value;
+    }
+    // W5C §11.2: ручки стресс-теста — только когда выбран longctx_stress;
+    // пустое = не передаём (канон limit/max_samples), min <= max.
+    if (isLongctx) {
+      const longctx = buildLongctxKnobs({
+        ctxMin,
+        ctxMax,
+        turnMin,
+        turnMax,
+        durationMin,
+      });
+      if (longctx.error) {
+        setSubmitError(longctx.error);
+        return;
+      }
+      Object.assign(knobs, longctx.knobs);
+    }
     if (reasoningEffort !== 'auto') {
       knobs['reasoning_effort'] = reasoningEffort;
     }
@@ -776,6 +813,12 @@ export const JobsPage = () => {
     topK,
     priority,
     timeLimitMinutes,
+    isLongctx,
+    ctxMin,
+    ctxMax,
+    turnMin,
+    turnMax,
+    durationMin,
     refresh,
   ]);
 
@@ -1358,7 +1401,97 @@ export const JobsPage = () => {
                 onChange={(e) => setEpochs(e.target.value)}
               />
             </div>
+            <div css={{ flex: 1 }}>
+              <Typography.Text color="secondary">Параллельные запросы (пусто — по умолчанию)</Typography.Text>
+              <Input
+                componentId="zala.jobs.form.max_samples"
+                type="number"
+                min={1}
+                max={256}
+                value={maxSamples}
+                placeholder="по умолчанию"
+                onChange={(e) => setMaxSamples(e.target.value)}
+              />
+            </div>
           </div>
+
+          {/* W5C §11.2: ручки стресс-теста longctx_stress — видны только для
+              его датасета/таска. Пустое = не передаём (канон limit). */}
+          {isLongctx && (
+            <div
+              css={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: theme.spacing.sm,
+                padding: theme.spacing.md,
+                border: `1px solid ${theme.colors.border}`,
+                borderRadius: theme.general.borderRadiusBase,
+              }}
+            >
+              <Typography.Title level={5} css={{ margin: 0 }}>
+                Стресс-тест longctx_stress
+              </Typography.Title>
+              <div css={{ display: 'flex', gap: theme.spacing.sm }}>
+                <div css={{ flex: 1 }}>
+                  <Typography.Text color="secondary">Контекст от (токенов)</Typography.Text>
+                  <Input
+                    componentId="zala.jobs.form.ctx_min"
+                    type="number"
+                    min={0}
+                    value={ctxMin}
+                    placeholder="по умолчанию"
+                    onChange={(e) => setCtxMin(e.target.value)}
+                  />
+                </div>
+                <div css={{ flex: 1 }}>
+                  <Typography.Text color="secondary">Контекст до (токенов)</Typography.Text>
+                  <Input
+                    componentId="zala.jobs.form.ctx_max"
+                    type="number"
+                    min={0}
+                    value={ctxMax}
+                    placeholder="по умолчанию"
+                    onChange={(e) => setCtxMax(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div css={{ display: 'flex', gap: theme.spacing.sm }}>
+                <div css={{ flex: 1 }}>
+                  <Typography.Text color="secondary">Прирост хода от</Typography.Text>
+                  <Input
+                    componentId="zala.jobs.form.turn_min"
+                    type="number"
+                    min={0}
+                    value={turnMin}
+                    placeholder="по умолчанию"
+                    onChange={(e) => setTurnMin(e.target.value)}
+                  />
+                </div>
+                <div css={{ flex: 1 }}>
+                  <Typography.Text color="secondary">Прирост хода до</Typography.Text>
+                  <Input
+                    componentId="zala.jobs.form.turn_max"
+                    type="number"
+                    min={0}
+                    value={turnMax}
+                    placeholder="по умолчанию"
+                    onChange={(e) => setTurnMax(e.target.value)}
+                  />
+                </div>
+                <div css={{ flex: 1 }}>
+                  <Typography.Text color="secondary">Длительность (мин)</Typography.Text>
+                  <Input
+                    componentId="zala.jobs.form.duration_min"
+                    type="number"
+                    min={1}
+                    value={durationMin}
+                    placeholder="по умолчанию"
+                    onChange={(e) => setDurationMin(e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Ф5.1: параметры генерации — основные ручки. */}
           <div
