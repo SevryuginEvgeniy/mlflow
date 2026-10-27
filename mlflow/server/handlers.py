@@ -127,6 +127,7 @@ from mlflow.protos.databricks_pb2 import (
     INVALID_STATE,
     NOT_IMPLEMENTED,
     PERMISSION_DENIED,
+    RESOURCE_ALREADY_EXISTS,
     RESOURCE_DOES_NOT_EXIST,
     ErrorCode,
 )
@@ -5708,6 +5709,7 @@ def _invoke_issue_detection_handler():
     This is a UI-only AJAX endpoint for running issue detection from the frontend.
     """
     from mlflow.genai.discovery.job import _fetch_provider_credentials, invoke_issue_detection_job
+    from mlflow.genai.discovery.utils import in_flight_detection_run
     from mlflow.server.jobs import submit_job
 
     _validate_content_type(request, ["application/json"])
@@ -5748,21 +5750,15 @@ def _invoke_issue_detection_handler():
 
     # Fail fast when no credential source exists, instead of submitting a job doomed to fail
     if not endpoint_name and not secret_id:
-        from mlflow.utils.providers import _CORE_PROVIDER_ENV_VARS
+        from mlflow.utils.providers import has_env_credentials, provider_credential_env_vars
 
-        env_config = _CORE_PROVIDER_ENV_VARS.get(provider_name)
-        if not env_config:
+        env_vars = provider_credential_env_vars(provider_name)
+        if not env_vars:
             raise MlflowException.invalid_parameter_value(
                 f"Unsupported provider '{provider}'. Choose a supported provider or "
                 "AI Gateway endpoint."
             )
-        if isinstance(env_config, dict):
-            env_vars = (
-                [env_config["api_key"]] if "api_key" in env_config else list(env_config.values())
-            )
-        else:
-            env_vars = [env_config]
-        if not any(os.environ.get(env_var) for env_var in env_vars):
+        if not has_env_credentials(provider_name):
             env_var_hint = env_vars[0] if len(env_vars) == 1 else f"one of {', '.join(env_vars)}"
             raise MlflowException.invalid_parameter_value(
                 f"No API key available for provider '{provider}'. Save an API key in "
@@ -5771,6 +5767,19 @@ def _invoke_issue_detection_handler():
 
     store = _get_tracking_store()
     _validate_trace_ids_in_experiment(store, trace_ids, experiment_id)
+
+    # After the checks above rather than before, so request validation stays free of database
+    # reads and the "fails fast" contract on an unsupported provider or a missing key holds. The
+    # cost is that a caller with neither a key nor a free slot is told about the key first, which
+    # sends the dialog to its API-key step before this refusal; the opposite order would make
+    # every invoke read the run table before validating its own arguments.
+    if in_flight_run_id := in_flight_detection_run(store, experiment_id):
+        raise MlflowException(
+            "Issue detection is already running for this experiment "
+            f"(run {in_flight_run_id}). Wait for it to finish, or cancel it, before starting "
+            "another.",
+            error_code=RESOURCE_ALREADY_EXISTS,
+        )
 
     # Fetch credentials required for executing the job
     if secret_id:
@@ -7820,9 +7829,18 @@ def _list_supported_models():
 @_disable_if_artifacts_only
 @_disable_if_gateway_disabled
 def _get_provider_config():
+    from mlflow.utils.providers import has_env_credentials
+
     try:
         provider = request.args.get("provider")
+        # Normalized here rather than relying on `has_env_credentials` to lower-case internally,
+        # which is how a mixed-case provider works today -- by accident rather than by contract.
+        provider_name = provider.lower() if provider else provider
         config = get_provider_config_response(provider)
+        # Reported so a client can tell whether this provider needs a key saved at all. A server
+        # started with the provider's own environment variable set already has a credential, and
+        # asking for another would be asking for one it would not use.
+        config["env_credentials_available"] = has_env_credentials(provider_name)
         return jsonify(config)
     except (ImportError, ValueError) as e:
         raise MlflowException(str(e), error_code=INVALID_PARAMETER_VALUE)
