@@ -22,6 +22,7 @@ throughout the investigation.
 Fetch each workflow's latest scheduled run and the jobs for each failed run:
 
 ```bash
+# TODO: Add more nightly workflows.
 workflow_files=(cross-version-tests.yml)
 mkdir -p "$out_dir/inputs"
 rm -f "$out_dir"/inputs/*-latest-run.json "$out_dir"/inputs/*-jobs.json
