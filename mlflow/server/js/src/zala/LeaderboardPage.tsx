@@ -413,13 +413,20 @@ export const LeaderboardPage = (): JSX.Element => {
         return;
       }
 
-      const page = await searchZalaRuns(ids, { limit: 200 });
+      // Ран рейтинга ищем ОТДЕЛЬНЫМ запросом: общий поиск отдаёт последние
+      // 200 ранов по всем экспериментам, и рабочий эксперимент (тысячи
+      // ранов) вытесняет из страницы ран рейтинга — вкладка открывалась
+      // пустой. Рейтинговый эксперимент маленький, ему хватает своего лимита.
       const since = periodDays === 'all' ? 0 : Date.now() - Number(periodDays) * 86_400_000;
+      const [page, ratingPage] = await Promise.all([
+        searchZalaRuns(ids, { limit: 200 }),
+        ratingId && !experiment ? searchZalaRuns([ratingId], { limit: 20 }) : Promise.resolve(null),
+      ]);
       const inPeriod = page.runs.filter((run) => run.startTime >= since);
       setRuns(inPeriod);
 
-      const ratingRuns = inPeriod
-        .filter((run) => run.experimentId === ratingId)
+      const ratingRuns = (ratingPage ? ratingPage.runs : inPeriod.filter((run) => run.experimentId === ratingId))
+        .filter((run) => run.startTime >= since)
         .sort((a, b) => b.startTime - a.startTime);
       const latest = ratingRuns[0];
       if (latest) {
