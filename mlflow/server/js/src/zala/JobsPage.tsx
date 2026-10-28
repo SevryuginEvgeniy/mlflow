@@ -224,6 +224,10 @@ export const JobsPage = () => {
 
   const [jobs, setJobs] = useState<ZalaJob[]>([]);
   const [total, setTotal] = useState(0);
+  // B-113: фильтр по статусу. Кнопка очистки работает по выбранному
+  // статусу, а не всегда по «pending» — иначе она серая, когда очередь
+  // пуста, хотя failed-задач полно.
+  const [statusFilter, setStatusFilter] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<{ message: string; offline: boolean } | null>(null);
@@ -407,7 +411,10 @@ export const JobsPage = () => {
       .catch(() => setLiveRequests(0));
 
     try {
-      const result = await listJobs({ limit: 100 });
+      const result = await listJobs({
+        limit: 100,
+        ...(statusFilter ? { status: statusFilter } : {}),
+      });
       setJobs(result.jobs);
       setTotal(result.total);
       setLoadError(null);
@@ -424,7 +431,7 @@ export const JobsPage = () => {
     }
 
     await Promise.all([healthPromise, livePromise]);
-  }, []);
+  }, [statusFilter]);
 
   // Опции формы: таски и модели из сервиса (не хардкод).
   useEffect(() => {
@@ -913,20 +920,24 @@ export const JobsPage = () => {
     [token, refresh, handleActionError],
   );
 
+  // B-113: очистка идёт по выбранному статусу. Без фильтра — по pending,
+  // как раньше: это очередь, а не история.
+  const clearStatus = statusFilter || 'pending';
   const onClearQueue = useCallback(async () => {
-    if (!window.confirm('Удалить ВСЕ ожидающие задачи из очереди? Run и логи останутся.')) {
+    const label = STATUS_LABELS[clearStatus] ?? clearStatus;
+    if (!window.confirm(`Удалить ВСЕ задачи со статусом «${label}»? Run и логи останутся.`)) {
       return;
     }
     setActionError(null);
     setTokenError(null);
     try {
-      const { deleted } = await clearQueue('pending', token);
-      setSubmitNotice(`Удалено из очереди: ${deleted}`);
+      const { deleted } = await clearQueue(clearStatus, token);
+      setSubmitNotice(`Удалено (${label}): ${deleted}`);
       await refresh(false);
     } catch (e: unknown) {
       handleActionError(e);
     }
-  }, [token, refresh, handleActionError]);
+  }, [clearStatus, token, refresh, handleActionError]);
 
   const onRetry = useCallback(
     async (jobId: string) => {
@@ -1062,14 +1073,35 @@ export const JobsPage = () => {
             <Typography.Text color="secondary">
               {jobs.length} из {total}
             </Typography.Text>
-            {/* Ф5 §8.3: массовая очистка ожидающих задач. */}
-            <div css={{ marginLeft: 'auto' }}>
+            {/* B-113: фильтр по статусу. Кнопка очистки ниже привязана к
+                нему — иначе она серая при пустой очереди, хотя failed
+                хоть отбавляй. */}
+            <div css={{ marginLeft: 'auto', display: 'flex', gap: theme.spacing.sm, alignItems: 'center' }}>
+              <Typography.Text color="secondary">Статус:</Typography.Text>
+              <select
+                data-component-id="zala.jobs.status_filter"
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                css={{ padding: '4px 8px', borderRadius: 4 }}
+              >
+                <option value="">все</option>
+                {Object.keys(STATUS_LABELS).map((status) => (
+                  <option key={status} value={status}>
+                    {STATUS_LABELS[status]}
+                  </option>
+                ))}
+              </select>
+              {/* Ф5 §8.3: массовая очистка — по выбранному статусу. */}
               <Button
                 componentId="zala.jobs.clear_queue"
                 onClick={onClearQueue}
-                disabled={!hasToken || pendingJobId !== null || jobs.every((job) => job.status !== 'pending')}
+                disabled={
+                  !hasToken ||
+                  pendingJobId !== null ||
+                  jobs.every((job) => job.status !== clearStatus)
+                }
               >
-                Очистить очередь
+                Очистить {STATUS_LABELS[clearStatus] ?? clearStatus}
               </Button>
             </div>
           </div>
