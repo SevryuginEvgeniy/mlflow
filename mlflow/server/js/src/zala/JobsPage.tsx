@@ -38,6 +38,7 @@ import {
   deleteJob,
   estimateJob,
   getApiBase,
+  getLiveRequests,
   createExperiment,
   listExperiments,
   listJobs,
@@ -229,6 +230,9 @@ export const JobsPage = () => {
 
   const [healthStatus, setHealthStatus] = useState<string>('unknown');
   const [healthError, setHealthError] = useState<string | null>(null);
+  // Сколько запросов к модели идёт прямо сейчас — чтобы не упереться
+  // в лимит шлюза (превышение даёт RateLimitError и роняет прогоны).
+  const [liveRequests, setLiveRequests] = useState<number>(0);
 
   const [token, setToken] = useState<string>(() => readToken());
   const [tokenError, setTokenError] = useState<string | null>(null);
@@ -396,6 +400,12 @@ export const JobsPage = () => {
         setHealthError(errorText(e));
       });
 
+    // Счётчик активных запросов — отдельно от очереди: он нужен даже
+    // когда список job'ов не загрузился.
+    const livePromise = getLiveRequests()
+      .then((active) => setLiveRequests(active))
+      .catch(() => setLiveRequests(0));
+
     try {
       const result = await listJobs({ limit: 100 });
       setJobs(result.jobs);
@@ -413,7 +423,7 @@ export const JobsPage = () => {
       setIsRefreshing(false);
     }
 
-    await healthPromise;
+    await Promise.all([healthPromise, livePromise]);
   }, []);
 
   // Опции формы: таски и модели из сервиса (не хардкод).
@@ -972,6 +982,14 @@ export const JobsPage = () => {
         <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center', flexWrap: 'wrap' }}>
           <Tag componentId="zala.jobs.health" color={healthColor}>
             API: {healthStatus}
+          </Tag>
+          {/* Активные запросы к модели: сколько идёт прямо сейчас по всем
+              воркерам. Держим ниже лимита шлюза, иначе RateLimitError. */}
+          <Tag
+            componentId="zala.jobs.live_requests"
+            color={liveRequests > 0 ? 'indigo' : undefined}
+          >
+            Активных запросов: {liveRequests}
           </Tag>
           {isRefreshing && <Spinner size="small" />}
           <Button componentId="zala.jobs.refresh" onClick={() => refresh(false)} disabled={isLoading}>

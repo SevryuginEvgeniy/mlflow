@@ -692,3 +692,14 @@ export const getRunSamples = async (runId: string): Promise<ZalaRunSample[]> => 
 export const apiHealth = async (): Promise<ZalaHealth> => {
   return request<ZalaHealth>('/health');
 };
+
+/**
+ * Сколько запросов к модели идёт прямо сейчас (по всем живым воркерам).
+ *
+ * Планировщик показывает это число, чтобы не упереться в лимит шлюза:
+ * превышение даёт RateLimitError и роняет прогоны.
+ */
+export const getLiveRequests = async (): Promise<number> => {
+  const payload = await request<{ active: number }>('/jobs/live-requests');
+  return payload.active ?? 0;
+};
