@@ -274,6 +274,8 @@ export const JobsPage = () => {
   // Дефолт 0.8 — совпадает с DEFAULT_KNOBS API (B-92).
   const [temperature, setTemperature] = useState<string>('0.8');
   const [maxTokens, setMaxTokens] = useState<string>('');
+  // #31: первые N сэмплов датасета — smoke-прогон на подвыборке.
+  const [sampleLimit, setSampleLimit] = useState<string>('');
   const [reasoningEffort, setReasoningEffort] = useState<string>('auto');
   // W2C: песочница агентских тасков. `auto` — ключ не передаём (W1B подставит).
   const [sandbox, setSandbox] = useState<string>('auto');
@@ -619,6 +621,15 @@ export const JobsPage = () => {
       }
       knobs['max_tokens'] = value;
     }
+    // #31: лимит сэмплов — пусто = весь датасет.
+    if (sampleLimit.trim() !== '') {
+      const value = Number(sampleLimit);
+      if (!Number.isInteger(value) || value < 1) {
+        setSubmitError('лимит сэмплов: пусто (весь датасет) или целое >= 1');
+        return;
+      }
+      knobs['limit'] = value;
+    }
     // longctx_stress Q1: параллельные запросы (уровень потоков стресс-теста).
     if (maxSamples.trim() !== '') {
       const value = Number(maxSamples);
@@ -833,6 +844,7 @@ export const JobsPage = () => {
     runName,
     temperature,
     maxTokens,
+    sampleLimit,
     maxSamples,
     reasoningEffort,
     sandbox,
@@ -1558,6 +1570,20 @@ export const JobsPage = () => {
                   placeholder="без лимита"
                   onChange={(e) => setMaxTokens(e.target.value)}
                 />
+              </div>
+              <div css={{ flex: 1 }}>
+                <Typography.Text color="secondary">Лимит сэмплов (пусто — весь датасет)</Typography.Text>
+                <Input
+                  componentId="zala.jobs.form.limit"
+                  type="number"
+                  min={1}
+                  value={sampleLimit}
+                  placeholder="весь датасет"
+                  onChange={(e) => setSampleLimit(e.target.value)}
+                />
+                <Typography.Text color="secondary" css={{ fontSize: 12 }}>
+                  Пусто — весь датасет. Задайте N для smoke-прогона
+                </Typography.Text>
               </div>
             </div>
             <div>
