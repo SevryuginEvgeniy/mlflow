@@ -533,12 +533,17 @@ export const retryJob = async (jobId: string, token: string): Promise<ZalaJob> =
   return toZalaJob(raw);
 };
 
-/** Оценка длительности по истории (или fallback). */
+/** Оценка длительности по истории (или fallback).
+ *
+ * B-98: `sandbox` передаётся, чтобы оценка валидировала песочницу так же, как
+ * постановка; иначе `math_python` + `local` даёт 200 здесь и 422 на POST /jobs.
+ */
 export const estimateJob = async (
   task: string,
   model: string,
   samples?: number,
   dataset?: string,
+  sandbox?: string,
 ): Promise<ZalaEstimate> => {
   const params = new URLSearchParams({ task, model });
   if (samples !== undefined) {
@@ -546,6 +551,9 @@ export const estimateJob = async (
   }
   if (dataset) {
     params.set('dataset', dataset);
+  }
+  if (sandbox) {
+    params.set('sandbox', sandbox);
   }
   return request<ZalaEstimate>(`/estimate?${params.toString()}`);
 };

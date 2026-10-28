@@ -481,7 +481,15 @@ export const JobsPage = () => {
       return undefined;
     }
     const timer = window.setTimeout(() => {
-      estimateJob(estimateTask, model, undefined, estimateDataset)
+      // B-98: 'auto' = ручки нет (как и при постановке), иначе оценка разошлась
+      // бы с POST /jobs на math_python + local.
+      estimateJob(
+        estimateTask,
+        model,
+        undefined,
+        estimateDataset,
+        sandbox === 'auto' ? undefined : sandbox,
+      )
         .then((result) => {
           if (!cancelled) {
             setEstimate(result);
@@ -504,6 +512,7 @@ export const JobsPage = () => {
     serviceTasks,
     localDataset,
     model,
+    sandbox,
   ]);
 
   /**
@@ -824,6 +833,7 @@ export const JobsPage = () => {
     runName,
     temperature,
     maxTokens,
+    maxSamples,
     reasoningEffort,
     sandbox,
     systemPrompt,
