@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import random
 import threading
 import time
@@ -301,12 +302,28 @@ from mlflow.utils.validation import (
     _validate_trace_archival_location,
     _validate_trace_archival_retention_string,
     _validate_trace_tag,
+    invalid_value,
 )
 from mlflow.utils.workspace_utils import DEFAULT_WORKSPACE_NAME
 
 _T = TypeVar("_T")
 
 _logger = logging.getLogger(__name__)
+
+
+def _validate_trace_id(trace_id: str) -> None:
+    """ZALABench: trace_id должен быть одним компонентом пути (CVE-2026-53995).
+
+    Перенесено из upstream `31ff9e56f5` (#26979), который закрывает только
+    ``FileStore``. У нас backend Postgres, и ``trace_id`` подставляется в путь
+    артефактов без проверки — ``../../x`` уводит запись за пределы каталога
+    эксперимента. Тот же контракт, что в ``file_store``.
+    """
+    if not trace_id or trace_id.rstrip(" .") != trace_id or os.path.basename(trace_id) != trace_id:
+        raise MlflowException(
+            invalid_value("trace_id", trace_id, "must be a single path component"),
+            error_code=INVALID_PARAMETER_VALUE,
+        )
 
 _RUN_DELETE_CASCADE_MODELS = (SqlMetric, SqlLatestMetric, SqlParam, SqlTag)
 
@@ -3882,6 +3899,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         return self._run_with_deadlock_retry(self._start_trace_once, trace_info)
 
     def _start_trace_once(self, trace_info: "TraceInfo") -> TraceInfo:
+        _validate_trace_id(trace_info.trace_id)
         trace_name = validate_trace_name(trace_info.tags.get(TraceTagKey.TRACE_NAME))
         with self.ManagedSessionMaker(read_only=False) as session:
             experiment = self.get_experiment(trace_info.experiment_id)
@@ -5709,6 +5727,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             spans_by_trace[span.trace_id].append(span)
 
         all_trace_ids = list(spans_by_trace.keys())
+        # log_spans тоже создаёт трейсы по клиентским id — та же проверка.
+        for trace_id in all_trace_ids:
+            _validate_trace_id(trace_id)
 
         # Pre-compute per-trace aggregates outside the DB session (pure Python, no I/O)
         trace_aggregates: dict[str, _TraceAggregate] = {}
