@@ -994,13 +994,15 @@ export const JobsPage = () => {
           <Tag componentId="zala.jobs.health" color={healthColor}>
             API: {healthStatus}
           </Tag>
-          {/* Активные запросы к модели: сколько идёт прямо сейчас по всем
-              воркерам. Держим ниже лимита шлюза, иначе RateLimitError. */}
+          {/* Активные сессии: сколько сэмплов идёт прямо сейчас по всем
+              воркерам. Считаем сессии, а не вызовы модели — один сэмпл в
+              react-цикле делает несколько запросов, но занимает одну
+              сессию. Держим ниже лимита шлюза, иначе RateLimitError. */}
           <Tag
             componentId="zala.jobs.live_requests"
             color={liveRequests > 0 ? 'indigo' : undefined}
           >
-            Активных запросов: {liveRequests}
+            Активных сессий: {liveRequests}
           </Tag>
           {isRefreshing && <Spinner size="small" />}
           <Button componentId="zala.jobs.refresh" onClick={() => refresh(false)} disabled={isLoading}>
