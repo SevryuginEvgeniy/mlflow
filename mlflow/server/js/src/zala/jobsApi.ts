@@ -4,7 +4,9 @@
  * Данные очереди живут в нашей БД (`zala.*`), MLflow о них не знает,
  * поэтому страница ходит в FastAPI-сервис, а не в MLflow REST.
  *
- * Read-only GET — без токена; управляющие POST — с `Authorization: Bearer`.
+ * Read-only GET — без токена; управляющие POST — с `X-Zala-Token`.
+ * Не `Authorization`: за прокси на нём `auth_basic`, и браузерный Bearer
+ * перетирал пароль входа — прокси отвечал 401 на каждый POST.
  */
 
 /**
@@ -214,7 +216,9 @@ const request = async <T>(path: string, init?: RequestInit, token?: string): Pro
     headers['Content-Type'] = 'application/json';
   }
   if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+    // Не `Authorization`: за прокси на нём висит `auth_basic`, и браузерный
+    // Bearer перетирал пароль входа — прокси отвечал 401 на каждый POST.
+    headers['X-Zala-Token'] = token;
   }
 
   let response: Response;

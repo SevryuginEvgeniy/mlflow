@@ -334,7 +334,7 @@ const runMatchesCandidate = (run: ZalaRunSummary, candidate: Candidate): boolean
 
 const fetchCandidates = async (token: string): Promise<Candidate[]> => {
   const response = await fetch(`${getApiBase()}/candidates`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    headers: token ? { 'X-Zala-Token': token } : {},
   });
   if (!response.ok) {
     let detail = `HTTP ${response.status}`;
@@ -599,7 +599,7 @@ export const LeaderboardPage = (): JSX.Element => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(token ? { 'X-Zala-Token': token } : {}),
         },
         body: JSON.stringify({
           display_name: addName.trim(),
@@ -638,7 +638,7 @@ export const LeaderboardPage = (): JSX.Element => {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(token ? { 'X-Zala-Token': token } : {}),
         },
         body: JSON.stringify({ display_name: renameValue.trim() }),
       });
